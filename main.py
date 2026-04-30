@@ -149,7 +149,9 @@ async def handle_webhook(request: Request):
                 reply = await process_message(sender_id, user_text)
                 await send_instagram_message(sender_id, reply)
     except Exception as e:
-        print(f"Ошибка: {e}")
+    import traceback
+    print(f"Ошибка: {e}")
+    print(traceback.format_exc())
     return {"status": "ok"}
 
 @app.get("/privacy", response_class=HTMLResponse)
