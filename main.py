@@ -16,8 +16,8 @@ KINDERGARTEN_INFO = """
 
 ОСНОВНАЯ ИНФОРМАЦИЯ:
 - Возраст детей: от 1.5 до 7 лет
-- Адрес: [2-й переулок С. Датова 11]
-- Телефон: [+77004088588,+77004518053]
+- Адрес: [ВАШ_АДРЕС]
+- Телефон: [ВАШ_ТЕЛЕФОН]
 - Instagram: @ansarik.balabaqsha
 
 РЕЖИМ РАБОТЫ:
@@ -25,8 +25,8 @@ KINDERGARTEN_INFO = """
 - Сб–Вс: выходной
 
 СТОИМОСТЬ (в месяц):
-- Полный день (7:30–19:00): [30000 тг]
-- Короткий день (7:30–14:00): [20000 тг]
+- Полный день (7:30–19:00): [ЦЕНА]
+- Короткий день (7:30–14:00): [ЦЕНА]
 - Питание включено в стоимость
 
 ЗАПИСЬ НА ЭКСКУРСИЮ:
@@ -149,9 +149,7 @@ async def handle_webhook(request: Request):
                 reply = await process_message(sender_id, user_text)
                 await send_instagram_message(sender_id, reply)
     except Exception as e:
-    import traceback
-    print(f"Ошибка: {e}")
-    print(traceback.format_exc())
+        print(f"Ошибка: {e}")
     return {"status": "ok"}
 
 @app.get("/privacy", response_class=HTMLResponse)
