@@ -17,7 +17,7 @@ conversation_history = {}
 
 
 async def send_message(recipient_id: str, text: str):
-    url = "https://graph.facebook.com/v19.0/me/messages"
+    url = "https://graph.facebook.com/v19.0/17841479977199535/messages"
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": text},
