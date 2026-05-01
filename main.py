@@ -1,4 +1,5 @@
 import os
+import json
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
@@ -11,6 +12,8 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MANAGER_INSTAGRAM_ID = os.getenv("MANAGER_INSTAGRAM_ID", "")
 WHATSAPP_LINK = os.getenv("WHATSAPP_LINK", "https://wa.me/7XXXXXXXXXX")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_MANAGER_CHAT_ID = os.getenv("TELEGRAM_MANAGER_CHAT_ID", "")
 
 # ID Instagram аккаунта бота (adab_ai_agency)
 BOT_INSTAGRAM_ID = os.getenv("BOT_INSTAGRAM_ID", "17841479977199535")
@@ -188,9 +191,49 @@ ANTI-BOT СТРАТЕГИЯ
 DM → WhatsApp → Звонок → Продажа
 
 Действуй как реальный sales-killer из Adab AI Agency,
-который понимает боль бизнеса и закрывает сделки."""
+который понимает боль бизнеса и закрывает сделки.
+
+═══════════════════════════════════════
+ТЕХНИЧЕСКИЙ ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)
+
+Отвечай ТОЛЬКО валидным JSON без markdown-обёртки:
+{{"reply": "текст ответа клиенту", "is_hot_lead": false}}
+
+Правила определения is_hot_lead = true:
+• Клиент прямо спрашивает цену или стоимость
+• Говорит "хочу", "готов", "давайте начнём", "беру", "оформляем"
+• Оставляет номер телефона или просит перезвонить
+• Просит назначить встречу, звонок или созвон
+• Явно выражает намерение купить прямо сейчас
+
+Если is_hot_lead = true → в поле reply напиши клиенту что передаёшь его менеджеру и он свяжется в ближайшее время, укажи WhatsApp {WHATSAPP_LINK}.
+Если is_hot_lead = false → в поле reply отвечай по стандартной sales-логике выше."""
 
 conversation_history = {}
+
+
+async def send_telegram_notification(sender_id: str, message_text: str, ai_reply: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_MANAGER_CHAT_ID:
+        print("TELEGRAM: not configured, skipping notification")
+        return
+    text = (
+        f"🔥 <b>Горячий лид в Instagram!</b>\n\n"
+        f"👤 ID клиента: <code>{sender_id}</code>\n"
+        f"💬 <b>Сообщение:</b> {message_text}\n\n"
+        f"🤖 <b>Ответ бота:</b> {ai_reply}"
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_MANAGER_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload)
+            print(f"TELEGRAM RESULT: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"TELEGRAM ERROR: {e}")
 
 
 async def send_message(recipient_id: str, text: str):
@@ -209,7 +252,7 @@ async def send_message(recipient_id: str, text: str):
         return r.json()
 
 
-async def ask_claude(sender_id: str, user_text: str) -> str:
+async def ask_claude(sender_id: str, user_text: str) -> tuple[str, bool]:
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         if sender_id not in conversation_history:
@@ -222,13 +265,33 @@ async def ask_claude(sender_id: str, user_text: str) -> str:
             system=SYSTEM_PROMPT,
             messages=history
         )
-        reply = response.content[0].text
+        raw = response.content[0].text.strip()
+        print(f"CLAUDE RAW: {raw}")
+
+        # Strip markdown code fences if Claude wrapped the JSON
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        parsed = json.loads(raw)
+        reply = parsed.get("reply", "")
+        is_hot_lead = bool(parsed.get("is_hot_lead", False))
+
         conversation_history[sender_id].append({"role": "assistant", "content": reply})
-        print(f"CLAUDE REPLY: {reply}")
-        return reply
+        print(f"CLAUDE REPLY: {reply} | HOT: {is_hot_lead}")
+        return reply, is_hot_lead
+
+    except json.JSONDecodeError:
+        # Fallback: treat raw output as plain reply, no hot lead detection
+        print(f"CLAUDE JSON PARSE ERROR, using raw text as reply")
+        reply = response.content[0].text.strip() if 'response' in dir() else "Произошла ошибка, попробуйте ещё раз."
+        conversation_history[sender_id].append({"role": "assistant", "content": reply})
+        return reply, False
     except Exception as e:
         print(f"CLAUDE ERROR: {e}")
-        return f"Ошибка Claude: {str(e)}"
+        return f"Ошибка Claude: {str(e)}", False
 
 
 @app.get("/webhook")
@@ -246,30 +309,34 @@ async def webhook(request: Request):
     try:
         for entry in body.get("entry", []):
             account_id = entry.get("id")
-            
+
             if account_id != BOT_INSTAGRAM_ID:
                 print(f"SKIP: message for account {account_id}, not for bot {BOT_INSTAGRAM_ID}")
                 continue
-            
+
             for messaging in entry.get("messaging", []):
                 sender_id = messaging["sender"]["id"]
-                
+
                 if messaging.get("message", {}).get("is_echo"):
                     print(f"SKIP: echo message")
                     continue
-                
+
                 if sender_id == BOT_INSTAGRAM_ID:
                     print(f"SKIP: message from bot itself")
                     continue
-                
+
                 text = messaging.get("message", {}).get("text", "")
                 if not text:
                     print(f"SKIP: no text (read/delivery event)")
                     continue
-                
+
                 print(f"MSG FROM {sender_id}: {text}")
-                reply = await ask_claude(sender_id, text)
+                reply, is_hot_lead = await ask_claude(sender_id, text)
                 await send_message(sender_id, reply)
+
+                if is_hot_lead:
+                    await send_telegram_notification(sender_id, text, reply)
+
     except Exception as e:
         print(f"WEBHOOK ERROR: {e}")
     return {"status": "ok"}
