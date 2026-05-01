@@ -16,6 +16,8 @@ MANAGER_INSTAGRAM_ID = os.getenv("MANAGER_INSTAGRAM_ID", "")
 WHATSAPP_LINK = os.getenv("WHATSAPP_LINK", "https://wa.me/7XXXXXXXXXX")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_MANAGER_CHAT_ID = os.getenv("TELEGRAM_MANAGER_CHAT_ID", "")
+REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_TTL = 30 * 24 * 60 * 60  # 30 days
 
 # ID Instagram аккаунта бота (adab_ai_agency)
 BOT_INSTAGRAM_ID = os.getenv("BOT_INSTAGRAM_ID", "17841479977199535")
@@ -226,7 +228,56 @@ DM → WhatsApp → Звонок → Продажа
 Если lead_temperature = "hot" или "warm" → в поле reply напиши клиенту что передаёшь его менеджеру и он свяжется в ближайшее время, укажи WhatsApp {WHATSAPP_LINK}.
 Если lead_temperature = "cold" → в поле reply отвечай по стандартной sales-логике выше."""
 
-conversation_history = {}
+class ConversationStore:
+    def __init__(self):
+        self._client = None
+        self._fallback: dict = {}
+        self._redis_failed = False
+
+    def _connect(self):
+        if self._client is not None:
+            return self._client
+        if not REDIS_URL or self._redis_failed:
+            return None
+        try:
+            import redis
+            client = redis.from_url(REDIS_URL, decode_responses=True)
+            client.ping()
+            self._client = client
+            print("REDIS: connected successfully")
+        except Exception as e:
+            print(f"REDIS WARNING: connection failed ({type(e).__name__}: {e}), using in-memory fallback")
+            self._redis_failed = True
+        return self._client
+
+    def get_history(self, user_id: str) -> list:
+        r = self._connect()
+        if r:
+            try:
+                raw = r.get(f"conv:{user_id}")
+                return json.loads(raw)[-20:] if raw else []
+            except Exception as e:
+                print(f"REDIS GET ERROR: {e}")
+        return list(self._fallback.get(user_id, []))[-20:]
+
+    def add_message(self, user_id: str, role: str, content: str):
+        r = self._connect()
+        if r:
+            try:
+                key = f"conv:{user_id}"
+                raw = r.get(key)
+                history = json.loads(raw) if raw else []
+                history.append({"role": role, "content": content})
+                r.set(key, json.dumps(history), ex=REDIS_TTL)
+                return
+            except Exception as e:
+                print(f"REDIS SET ERROR: {e}")
+        if user_id not in self._fallback:
+            self._fallback[user_id] = []
+        self._fallback[user_id].append({"role": role, "content": content})
+
+
+store = ConversationStore()
 
 
 def _html_escape(text: str) -> str:
@@ -243,7 +294,7 @@ async def send_telegram_notification(sender_id: str, ai_reply: str, temperature:
     almaty_tz = pytz.timezone("Asia/Almaty")
     now = datetime.now(almaty_tz).strftime("%d.%m.%Y %H:%M")
 
-    history = conversation_history.get(sender_id, [])
+    history = store.get_history(sender_id)
     context_lines = []
     for msg in history[-3:]:
         role_label = "Клиент" if msg["role"] == "user" else "Бот"
@@ -310,10 +361,8 @@ async def send_message(recipient_id: str, text: str):
 async def ask_claude(sender_id: str, user_text: str) -> tuple[str, bool, str]:
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        if sender_id not in conversation_history:
-            conversation_history[sender_id] = []
-        conversation_history[sender_id].append({"role": "user", "content": user_text})
-        history = conversation_history[sender_id][-10:]
+        store.add_message(sender_id, "user", user_text)
+        history = store.get_history(sender_id)[-10:]
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=500,
@@ -335,14 +384,14 @@ async def ask_claude(sender_id: str, user_text: str) -> tuple[str, bool, str]:
         temperature = parsed.get("lead_temperature", "cold")
         is_hot_lead = temperature in ("hot", "warm")
 
-        conversation_history[sender_id].append({"role": "assistant", "content": reply})
+        store.add_message(sender_id, "assistant", reply)
         print(f"CLAUDE REPLY: {reply} | TEMP: {temperature} | HOT: {is_hot_lead}")
         return reply, is_hot_lead, temperature
 
     except json.JSONDecodeError:
         print(f"CLAUDE JSON PARSE ERROR, using raw text as reply")
         reply = response.content[0].text.strip() if 'response' in dir() else "Произошла ошибка, попробуйте ещё раз."
-        conversation_history[sender_id].append({"role": "assistant", "content": reply})
+        store.add_message(sender_id, "assistant", reply)
         return reply, False, "cold"
     except Exception as e:
         print(f"CLAUDE ERROR: {e}")
