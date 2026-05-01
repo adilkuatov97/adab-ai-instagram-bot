@@ -194,30 +194,46 @@ DM → WhatsApp → Звонок → Продажа
 который понимает боль бизнеса и закрывает сделки.
 
 ═══════════════════════════════════════
+ПРАВИЛА ВЗАИМОДЕЙСТВИЯ
+
+• При первом сообщении всегда представляйся: "Здравствуйте! Я AI-помощник Adab AI Agency"
+• Всегда задавай 1-2 уточняющих вопроса перед тем как предлагать решение
+• Никогда не пиши длиннее 5 строк
+• Если клиент уклоняется от вопроса о бизнесе — мягко возвращай в тему
+• Если клиент 3 сообщения подряд игнорирует WhatsApp — смени тактику: предложи кейс или конкретный быстрый инсайт
+
+═══════════════════════════════════════
+ЯЗЫК ОБЩЕНИЯ
+
+• Определяй язык клиента и отвечай на том же языке
+• Если клиент пишет на казахском — отвечай на казахском
+• Если клиент пишет на английском — отвечай на английском
+• По умолчанию — русский
+
+═══════════════════════════════════════
 ТЕХНИЧЕСКИЙ ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО)
 
 Отвечай ТОЛЬКО валидным JSON без markdown-обёртки:
-{{"reply": "текст ответа клиенту", "is_hot_lead": false}}
+{{"reply": "текст ответа клиенту", "lead_temperature": "cold"}}
 
-Правила определения is_hot_lead = true:
-• Клиент прямо спрашивает цену или стоимость
-• Говорит "хочу", "готов", "давайте начнём", "беру", "оформляем"
-• Оставляет номер телефона или просит перезвонить
-• Просит назначить встречу, звонок или созвон
-• Явно выражает намерение купить прямо сейчас
+Правила определения lead_temperature:
+• "hot" — явно готов покупать: "хочу", "беру", "готов", "мой WhatsApp", "созвонимся", "когда можем начать", оставляет телефон, просит встречу
+• "warm" — проявляет конкретный интерес: спрашивает цену, сроки, примеры работ, как работает процесс
+• "cold" — просто разведка: привет, что вы делаете, расскажите подробнее
 
-Если is_hot_lead = true → в поле reply напиши клиенту что передаёшь его менеджеру и он свяжется в ближайшее время, укажи WhatsApp {WHATSAPP_LINK}.
-Если is_hot_lead = false → в поле reply отвечай по стандартной sales-логике выше."""
+Если lead_temperature = "hot" или "warm" → в поле reply напиши клиенту что передаёшь его менеджеру и он свяжется в ближайшее время, укажи WhatsApp {WHATSAPP_LINK}.
+Если lead_temperature = "cold" → в поле reply отвечай по стандартной sales-логике выше."""
 
 conversation_history = {}
 
 
-async def send_telegram_notification(sender_id: str, message_text: str, ai_reply: str):
+async def send_telegram_notification(sender_id: str, message_text: str, ai_reply: str, temperature: str = "hot"):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_MANAGER_CHAT_ID:
         print("TELEGRAM: not configured, skipping notification")
         return
+    temp_label = "🔥 ГОРЯЧИЙ" if temperature == "hot" else "🌡️ ТЁПЛЫЙ"
     text = (
-        f"🔥 <b>Горячий лид в Instagram!</b>\n\n"
+        f"<b>Лид в Instagram — {temp_label}</b>\n\n"
         f"👤 ID клиента: <code>{sender_id}</code>\n"
         f"💬 <b>Сообщение:</b> {message_text}\n\n"
         f"🤖 <b>Ответ бота:</b> {ai_reply}"
@@ -252,7 +268,7 @@ async def send_message(recipient_id: str, text: str):
         return r.json()
 
 
-async def ask_claude(sender_id: str, user_text: str) -> tuple[str, bool]:
+async def ask_claude(sender_id: str, user_text: str) -> tuple[str, bool, str]:
     try:
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         if sender_id not in conversation_history:
@@ -277,21 +293,21 @@ async def ask_claude(sender_id: str, user_text: str) -> tuple[str, bool]:
 
         parsed = json.loads(raw)
         reply = parsed.get("reply", "")
-        is_hot_lead = bool(parsed.get("is_hot_lead", False))
+        temperature = parsed.get("lead_temperature", "cold")
+        is_hot_lead = temperature in ("hot", "warm")
 
         conversation_history[sender_id].append({"role": "assistant", "content": reply})
-        print(f"CLAUDE REPLY: {reply} | HOT: {is_hot_lead}")
-        return reply, is_hot_lead
+        print(f"CLAUDE REPLY: {reply} | TEMP: {temperature} | HOT: {is_hot_lead}")
+        return reply, is_hot_lead, temperature
 
     except json.JSONDecodeError:
-        # Fallback: treat raw output as plain reply, no hot lead detection
         print(f"CLAUDE JSON PARSE ERROR, using raw text as reply")
         reply = response.content[0].text.strip() if 'response' in dir() else "Произошла ошибка, попробуйте ещё раз."
         conversation_history[sender_id].append({"role": "assistant", "content": reply})
-        return reply, False
+        return reply, False, "cold"
     except Exception as e:
         print(f"CLAUDE ERROR: {e}")
-        return f"Ошибка Claude: {str(e)}", False
+        return f"Ошибка Claude: {str(e)}", False, "cold"
 
 
 @app.get("/webhook")
@@ -331,11 +347,11 @@ async def webhook(request: Request):
                     continue
 
                 print(f"MSG FROM {sender_id}: {text}")
-                reply, is_hot_lead = await ask_claude(sender_id, text)
+                reply, is_hot_lead, temperature = await ask_claude(sender_id, text)
                 await send_message(sender_id, reply)
 
                 if is_hot_lead:
-                    await send_telegram_notification(sender_id, text, reply)
+                    await send_telegram_notification(sender_id, text, reply, temperature)
 
     except Exception as e:
         print(f"WEBHOOK ERROR: {e}")
