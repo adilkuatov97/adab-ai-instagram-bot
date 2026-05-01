@@ -11,13 +11,17 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MANAGER_INSTAGRAM_ID = os.getenv("MANAGER_INSTAGRAM_ID", "")
 
+# ID Instagram аккаунта бота (adab_ai_agency)
+# Бот отвечает ТОЛЬКО на сообщения, которые приходят на этот аккаунт
+BOT_INSTAGRAM_ID = os.getenv("BOT_INSTAGRAM_ID", "17841479977199535")
+
 SYSTEM_PROMPT = """Ты — дружелюбный AI-ассистент. Отвечай кратко и по делу на любом языке собеседника."""
 
 conversation_history = {}
 
 
 async def send_message(recipient_id: str, text: str):
-    # ВАЖНО: Для токенов IGAA... (Instagram User Token) используется graph.instagram.com
+    # Для токенов IGAA... используется graph.instagram.com
     url = "https://graph.instagram.com/v23.0/me/messages"
     payload = {
         "recipient": {"id": recipient_id},
@@ -69,13 +73,33 @@ async def webhook(request: Request):
     print(f"INCOMING: {body}")
     try:
         for entry in body.get("entry", []):
+            # entry["id"] — это ID аккаунта-получателя сообщения
+            account_id = entry.get("id")
+            
+            # Игнорируем сообщения, которые пришли НЕ на бот-аккаунт
+            if account_id != BOT_INSTAGRAM_ID:
+                print(f"SKIP: message for account {account_id}, not for bot {BOT_INSTAGRAM_ID}")
+                continue
+            
             for messaging in entry.get("messaging", []):
                 sender_id = messaging["sender"]["id"]
+                
+                # Игнорируем эхо (сообщения, отправленные самим ботом)
                 if messaging.get("message", {}).get("is_echo"):
+                    print(f"SKIP: echo message")
                     continue
+                
+                # Игнорируем сообщения, отправленные с самого бот-аккаунта
+                if sender_id == BOT_INSTAGRAM_ID:
+                    print(f"SKIP: message from bot itself")
+                    continue
+                
+                # Игнорируем события read/delivery (не сообщения)
                 text = messaging.get("message", {}).get("text", "")
                 if not text:
+                    print(f"SKIP: no text (read/delivery event)")
                     continue
+                
                 print(f"MSG FROM {sender_id}: {text}")
                 reply = await ask_claude(sender_id, text)
                 await send_message(sender_id, reply)
