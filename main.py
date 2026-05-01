@@ -6,6 +6,7 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
 import anthropic
+from groq import AsyncGroq
 
 app = FastAPI()
 
@@ -18,6 +19,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_MANAGER_CHAT_ID = os.getenv("TELEGRAM_MANAGER_CHAT_ID", "")
 REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_TTL = 30 * 24 * 60 * 60  # 30 days
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # ID Instagram аккаунта бота (adab_ai_agency)
 BOT_INSTAGRAM_ID = os.getenv("BOT_INSTAGRAM_ID", "17841479977199535")
@@ -342,6 +344,29 @@ async def send_telegram_notification(sender_id: str, ai_reply: str, temperature:
         print(f"TELEGRAM EXCEPTION: {type(e).__name__}: {e}")
 
 
+async def transcribe_audio(audio_url: str) -> str | None:
+    if not GROQ_API_KEY:
+        print("GROQ: GROQ_API_KEY not set, skipping transcription")
+        return None
+    print(f"TRANSCRIBING AUDIO: {audio_url}")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(audio_url)
+            r.raise_for_status()
+            audio_bytes = r.content
+        groq_client = AsyncGroq(api_key=GROQ_API_KEY)
+        transcription = await groq_client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=("audio.ogg", audio_bytes),
+        )
+        text = transcription.text.strip()
+        print(f"TRANSCRIPTION RESULT: {text}")
+        return text if text else None
+    except Exception as e:
+        print(f"GROQ ERROR: {type(e).__name__}: {e}")
+        return None
+
+
 async def send_message(recipient_id: str, text: str):
     url = "https://graph.instagram.com/v23.0/me/messages"
     payload = {
@@ -429,12 +454,30 @@ async def webhook(request: Request):
                     print(f"SKIP: message from bot itself")
                     continue
 
-                text = messaging.get("message", {}).get("text", "")
+                msg = messaging.get("message", {})
+                text = msg.get("text", "")
+                is_voice = False
+
                 if not text:
-                    print(f"SKIP: no text (read/delivery event)")
+                    for att in msg.get("attachments", []):
+                        if att.get("type") == "audio":
+                            audio_url = att.get("payload", {}).get("url", "")
+                            transcribed = await transcribe_audio(audio_url) if audio_url else None
+                            if transcribed:
+                                text = transcribed
+                                is_voice = True
+                            else:
+                                await send_message(sender_id, "Извините, не смог распознать голосовое. Напишите текстом, пожалуйста 🙏")
+                            break
+
+                if not text:
+                    print(f"SKIP: no text or supported attachment")
                     continue
 
-                print(f"MSG FROM {sender_id}: {text}")
+                if is_voice:
+                    print(f"MSG FROM {sender_id} (voice): {text}")
+                else:
+                    print(f"MSG FROM {sender_id}: {text}")
                 reply, is_hot_lead, temperature = await ask_claude(sender_id, text)
                 await send_message(sender_id, reply)
 
