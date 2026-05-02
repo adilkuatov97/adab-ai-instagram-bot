@@ -29,8 +29,8 @@ async def ask_claude(
     Returns (reply, is_hot_lead, temperature).
     conversation_history: list of {role, content} dicts for this sender.
     """
-    system_prompt = client.system_prompt or ""
     whatsapp_link = client.whatsapp_link or ""
+    system_prompt = (client.system_prompt or "").replace("{whatsapp_link}", whatsapp_link)
 
     # Inject whatsapp_link into the format instruction at the end of the prompt
     format_block = f"""
