@@ -43,15 +43,15 @@ async def main() -> None:
         result = await conn.execute(
             text(
                 "UPDATE clients SET system_prompt = :prompt, updated_at = NOW() "
-                "WHERE id = :id::uuid RETURNING id"
+                "WHERE id = CAST(:client_id AS UUID) RETURNING id"
             ),
-            {"prompt": prompt, "id": client_id},
+            {"prompt": prompt, "client_id": client_id},
         )
-        if result.rowcount == 0:
-            print(f"Error: client {client_id} not found")
-            await engine.dispose()
-            sys.exit(1)
+        not_found = result.rowcount == 0
     await engine.dispose()
+    if not_found:
+        print(f"Error: client {client_id} not found")
+        sys.exit(1)
 
     print(f"Updated client {client_id}: prompt {len(prompt)} chars")
 
