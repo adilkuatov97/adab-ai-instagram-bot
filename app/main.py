@@ -49,6 +49,7 @@ class _ConversationStore:
         self._client = None
         self._fallback: dict = {}
         self._failed = False
+        self._seen_mids: set = set()
 
     def _connect(self):
         if self._client is not None:
@@ -75,6 +76,24 @@ class _ConversationStore:
             except Exception as e:
                 print(f"REDIS GET ERROR: {e}")
         return list(self._fallback.get(key, []))[-20:]
+
+    def is_seen(self, mid: str) -> bool:
+        """Return True if mid was already processed (duplicate). Marks it seen atomically."""
+        r = self._connect()
+        if r:
+            try:
+                added = r.setnx(f"seen:{mid}", "1")
+                if added:
+                    r.expire(f"seen:{mid}", 86400)
+                return not bool(added)
+            except Exception as e:
+                print(f"REDIS SETNX ERROR: {e}")
+        if mid in self._seen_mids:
+            return True
+        self._seen_mids.add(mid)
+        if len(self._seen_mids) > 10000:
+            self._seen_mids.clear()
+        return False
 
     def append(self, key: str, role: str, content: str):
         r = self._connect()
@@ -253,6 +272,11 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     continue
 
                 msg = messaging.get("message", {})
+                mid = msg.get("mid", "")
+                if mid and _store.is_seen(mid):
+                    print(f"SKIP: duplicate mid={mid}")
+                    continue
+
                 text = msg.get("text", "")
                 is_voice = False
 
