@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 from sqlalchemy import select, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Client, Conversation, Lead, Message
@@ -126,20 +127,19 @@ async def get_stats(db: AsyncSession) -> dict[str, Any]:
 async def get_or_create_conversation(
     db: AsyncSession, client_id: uuid.UUID, instagram_user_id: str
 ) -> Conversation:
+    await db.execute(
+        pg_insert(Conversation)
+        .values(client_id=client_id, instagram_user_id=instagram_user_id)
+        .on_conflict_do_nothing(index_elements=["client_id", "instagram_user_id"])
+    )
+    await db.commit()
     result = await db.execute(
         select(Conversation).where(
             Conversation.client_id == client_id,
             Conversation.instagram_user_id == instagram_user_id,
         )
     )
-    conv = result.scalar_one_or_none()
-    if conv:
-        return conv
-    conv = Conversation(client_id=client_id, instagram_user_id=instagram_user_id)
-    db.add(conv)
-    await db.commit()
-    await db.refresh(conv)
-    return conv
+    return result.scalar_one()
 
 
 async def save_message(
