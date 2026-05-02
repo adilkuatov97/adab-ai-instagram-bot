@@ -111,6 +111,7 @@ def _client_dict(c) -> dict:
         "trial_ends_at": c.trial_ends_at.isoformat() if c.trial_ends_at else None,
         "created_by": c.created_by,
         "notes": c.notes,
+        "system_prompt": c.system_prompt,
         "created_at": c.created_at.isoformat(),
         "updated_at": c.updated_at.isoformat(),
     }
