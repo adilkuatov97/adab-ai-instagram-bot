@@ -221,14 +221,14 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
             if db is not None:
                 client = await client_service.get_by_instagram_id(db, account_id)
                 if client is not None:
-                    print(f"CLIENT SOURCE: DB | id={client.id} | business={client.business_name}")
+                    print(f"CLIENT SOURCE: DB | id={client.id} | business={client.business_name} | prompt_len={len(client.system_prompt) if client.system_prompt else 0}")
 
             if client is None:
                 client = _get_legacy_client()
                 if client is None or client.instagram_account_id != account_id:
                     print(f"CLIENT SOURCE: NOT FOUND | account_id={account_id}")
                     continue
-                print(f"CLIENT SOURCE: ENV (fallback synthetic) | account_id={account_id}")
+                print(f"CLIENT SOURCE: ENV (synthetic fallback) | account_id={account_id}")
 
             if client.status != "active" and not isinstance(client, _LegacyClient):
                 print(f"SKIP: client {account_id} status={client.status}")
