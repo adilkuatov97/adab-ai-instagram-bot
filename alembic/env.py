@@ -17,7 +17,9 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+# Alembic uses Direct Connection (port 5432) because Transaction Pooler
+# doesn't support PREPARE statements needed by asyncpg's migration runs.
+DATABASE_URL = os.getenv("DIRECT_DATABASE_URL") or os.getenv("DATABASE_URL", "")
 if DATABASE_URL:
     config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
