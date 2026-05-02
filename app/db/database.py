@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -11,8 +12,14 @@ engine = (
         DATABASE_URL,
         echo=False,
         pool_pre_ping=True,
-        connect_args={"statement_cache_size": 0},
-    )
+        pool_size=5,
+        max_overflow=10,
+        connect_args={
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+            "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
+        },
+    ).execution_options(compiled_cache=None)
     if DATABASE_URL
     else None
 )
