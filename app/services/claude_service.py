@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,12 +11,21 @@ from app.db.models import Client, Conversation
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
-def _strip_fences(raw: str) -> str:
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
+def _extract_json(raw: str) -> str:
+    """Strip markdown fences and any leading/trailing text outside the JSON object."""
+    # Remove ```json ... ``` or ``` ... ``` fences
+    if "```" in raw:
+        inner = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+        if inner:
+            raw = inner.group(1).strip()
+
+    # If still not starting with '{', find the first '{' … last '}'
+    if not raw.startswith("{"):
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            raw = raw[start : end + 1]
+
     return raw
 
 
@@ -62,8 +72,9 @@ async def ask_claude(
             system=full_system,
             messages=history,
         )
-        raw = _strip_fences(response.content[0].text.strip())
-        print(f"CLAUDE RAW: {raw}")
+        raw_text = response.content[0].text.strip()
+        print(f"CLAUDE RAW: {raw_text}")
+        raw = _extract_json(raw_text)
 
         parsed = json.loads(raw)
         reply = parsed.get("reply", "")
@@ -76,6 +87,10 @@ async def ask_claude(
     except json.JSONDecodeError:
         print("CLAUDE JSON PARSE ERROR, using raw text as reply")
         raw_reply = response.content[0].text.strip() if "response" in dir() else "Произошла ошибка, попробуйте ещё раз."
+        # Strip any JSON blob that leaked into the fallback reply
+        json_start = raw_reply.find("{")
+        if json_start > 0:
+            raw_reply = raw_reply[:json_start].strip()
         return raw_reply, False, "cold"
     except Exception as e:
         print(f"CLAUDE ERROR: {e}")
