@@ -1,23 +1,29 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 from datetime import datetime
 import pytz
 import httpx
 from fastapi import Depends, FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.admin.routes import router as admin_router
-from app.db.database import get_db
-from app.db.models import Client
+from app.db.database import get_db, async_session_factory
+from app.db.models import Client, Lead
 from app.services import client_service
 from app.services.claude_service import ask_claude
 from app.services.crypto_service import decrypt
+from app.services.debounce_service import DebounceService, DEBOUNCE_DELAY
 from app.services.instagram_service import send_message
 from app.services.telegram_service import send_lead_notification
 from app.services.voice_service import transcribe_audio
+
+logger = logging.getLogger(__name__)
 
 # ── Env ───────────────────────────────────────────────────────────────────────
 
@@ -34,6 +40,8 @@ _LEGACY_GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_TTL = 30 * 24 * 60 * 60
+
+_debounce = DebounceService(REDIS_URL)
 
 # ── FastAPI ───────────────────────────────────────────────────────────────────
 
@@ -217,6 +225,102 @@ def _resolve_groq_key(client) -> str:
     return key or GROQ_API_KEY
 
 
+# ── Debounce processor ────────────────────────────────────────────────────────
+
+async def process_after_debounce(
+    *,
+    client,
+    sender_id: str,
+    my_timestamp: float,
+    access_token: str,
+    telegram_chat_id: str,
+    whatsapp_link: str,
+) -> None:
+    try:
+        await asyncio.sleep(DEBOUNCE_DELAY)
+
+        client_id_str = str(client.id)
+
+        if not await _debounce.is_still_latest(client_id_str, sender_id, my_timestamp):
+            return
+
+        buffer_messages = await _debounce.get_and_clear_buffer(client_id_str, sender_id)
+        if not buffer_messages:
+            logger.info("DEBOUNCE: empty buffer for %s, nothing to process", sender_id)
+            return
+
+        n = len(buffer_messages)
+        combined_text = "\n".join(m["text"] for m in buffer_messages)
+        logger.info(
+            "DEBOUNCE: processing %d message(s) for %s: %r",
+            n, sender_id, combined_text[:80],
+        )
+
+        use_db = not isinstance(client, _LegacyClient) and async_session_factory is not None
+        cache_key = _cache_key(client.id, sender_id)
+
+        # ── DB: save each user message as a separate record ───────────────────
+        if use_db:
+            async with async_session_factory() as db:
+                conversation = await client_service.get_or_create_conversation(
+                    db, client.id, sender_id
+                )
+                for msg in buffer_messages:
+                    await client_service.save_message(
+                        db, conversation, "user", msg["text"], msg["is_voice"]
+                    )
+
+        # ── Cache: add combined user turn, get history for Claude ─────────────
+        _store.append(cache_key, "user", combined_text)
+        history = _store.get(cache_key)
+
+        # ── Claude ────────────────────────────────────────────────────────────
+        reply, is_hot_lead, temperature = await ask_claude(
+            sender_id, combined_text, client, history
+        )
+        _store.append(cache_key, "assistant", reply)
+
+        # ── DB: save assistant reply + lead ───────────────────────────────────
+        lead_id = None
+        if use_db:
+            async with async_session_factory() as db:
+                conversation = await client_service.get_or_create_conversation(
+                    db, client.id, sender_id
+                )
+                await client_service.save_message(db, conversation, "assistant", reply)
+                if is_hot_lead:
+                    lead = await client_service.save_lead(
+                        db, client.id, conversation, sender_id, temperature, combined_text
+                    )
+                    lead_id = lead.id
+
+        # ── Instagram ─────────────────────────────────────────────────────────
+        await send_message(sender_id, reply, access_token)
+
+        # ── Telegram notification + mark lead notified ────────────────────────
+        if is_hot_lead:
+            recent = _store.get(cache_key)
+            await send_lead_notification(
+                sender_id=sender_id,
+                ai_reply=reply,
+                temperature=temperature,
+                telegram_chat_id=telegram_chat_id,
+                whatsapp_link=whatsapp_link,
+                recent_messages=recent,
+            )
+            if use_db and lead_id is not None:
+                async with async_session_factory() as db:
+                    await db.execute(
+                        sa_update(Lead)
+                        .where(Lead.id == lead_id)
+                        .values(notified_to_telegram=True)
+                    )
+                    await db.commit()
+
+    except Exception as e:
+        logger.error("DEBOUNCE PROCESSOR ERROR: %s", e, exc_info=True)
+
+
 # ── Webhook ───────────────────────────────────────────────────────────────────
 
 @app.get("/webhook")
@@ -298,52 +402,23 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
                 print(f"MSG FROM {sender_id}{' (voice)' if is_voice else ''}: {text}")
 
-                # ── Conversation cache ─────────────────────────────────────
-                cache_key = _cache_key(client_id, sender_id)
-                _store.append(cache_key, "user", text)
-                history = _store.get(cache_key)
-
-                # ── DB: get/create conversation & save user message ────────
-                conversation = None
-                if db is not None:
-                    conversation = await client_service.get_or_create_conversation(
-                        db, client.id, sender_id
-                    )
-                    await client_service.save_message(db, conversation, "user", text, is_voice)
-
-                # ── Claude ─────────────────────────────────────────────────
-                reply, is_hot_lead, temperature = await ask_claude(
-                    sender_id, text, client, history
+                # ── Debounce: buffer message, schedule processing ──────────
+                my_ts = await _debounce.add_message_to_buffer(
+                    client_id=str(client_id),
+                    user_id=sender_id,
+                    message_text=text,
+                    is_voice=is_voice,
                 )
-
-                # ── Cache & DB: save assistant reply ───────────────────────
-                _store.append(cache_key, "assistant", reply)
-                if db is not None and conversation is not None:
-                    await client_service.save_message(db, conversation, "assistant", reply)
-
-                # ── Send reply ─────────────────────────────────────────────
-                await send_message(sender_id, reply, access_token)
-
-                # ── Lead notification ──────────────────────────────────────
-                if is_hot_lead:
-                    lead = None
-                    if db is not None and conversation is not None:
-                        lead = await client_service.save_lead(
-                            db, client.id, conversation, sender_id, temperature, text
-                        )
-
-                    recent = _store.get(cache_key)
-                    await send_lead_notification(
+                asyncio.create_task(
+                    process_after_debounce(
+                        client=client,
                         sender_id=sender_id,
-                        ai_reply=reply,
-                        temperature=temperature,
+                        my_timestamp=my_ts,
+                        access_token=access_token,
                         telegram_chat_id=telegram_chat_id,
                         whatsapp_link=whatsapp_link,
-                        recent_messages=recent,
                     )
-
-                    if db is not None and lead is not None:
-                        await client_service.mark_lead_notified(db, lead)
+                )
 
     except Exception as e:
         print(f"WEBHOOK ERROR: {e}")
