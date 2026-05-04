@@ -5,4 +5,5 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-.DS_Store
+.DS_Storeadab-ai-landing/
+scripts/compare_prompt.py
