@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import anthropic
@@ -9,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client, Conversation
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+SAFE_CLAUDE_FALLBACK = "Здравствуйте! Сейчас менеджер подключится и ответит вам вручную."
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_json(raw: str) -> str:
@@ -65,6 +69,10 @@ async def ask_claude(
     history = conversation_history[-10:]
 
     try:
+        if not ANTHROPIC_API_KEY:
+            logger.error("CLAUDE_ERROR anthropic_api_key_missing sender_id=%s", sender_id)
+            return SAFE_CLAUDE_FALLBACK, False, "cold"
+
         anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = anthropic_client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -85,13 +93,8 @@ async def ask_claude(
         return reply, is_hot_lead, temperature
 
     except json.JSONDecodeError:
-        print("CLAUDE JSON PARSE ERROR, using raw text as reply")
-        raw_reply = response.content[0].text.strip() if "response" in dir() else "Произошла ошибка, попробуйте ещё раз."
-        # Strip any JSON blob that leaked into the fallback reply
-        json_start = raw_reply.find("{")
-        if json_start > 0:
-            raw_reply = raw_reply[:json_start].strip()
-        return raw_reply, False, "cold"
+        logger.error("CLAUDE_ERROR json_parse_failed sender_id=%s", sender_id, exc_info=True)
+        return SAFE_CLAUDE_FALLBACK, False, "cold"
     except Exception as e:
-        print(f"CLAUDE ERROR: {e}")
-        return f"Ошибка: {str(e)}", False, "cold"
+        logger.error("CLAUDE_ERROR sender_id=%s error=%s", sender_id, e, exc_info=True)
+        return SAFE_CLAUDE_FALLBACK, False, "cold"

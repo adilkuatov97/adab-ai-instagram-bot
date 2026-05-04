@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -30,6 +32,14 @@ logger = logging.getLogger(__name__)
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "AdabAI2026$")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+APP_SECRET = os.getenv("APP_SECRET", "")
+APP_ENV = (
+    os.getenv("APP_ENV")
+    or os.getenv("ENVIRONMENT")
+    or os.getenv("APP_ENVIRONMENT")
+    or os.getenv("NODE_ENV")
+    or "development"
+).lower()
 
 # Legacy single-tenant fallback (used when DB is empty / not configured)
 _LEGACY_INSTAGRAM_ACCOUNT_ID = os.getenv("BOT_INSTAGRAM_ID", "")
@@ -47,6 +57,14 @@ _debounce = DebounceService(REDIS_URL)
 
 app = FastAPI(title="Adab AI Instagram Bot")
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
+
+
+@app.on_event("startup")
+async def startup_checks():
+    if _is_production() and not APP_SECRET:
+        logger.error("APP_SECRET_MISSING production=true meta_signature_verification=disabled")
+    elif not APP_SECRET:
+        logger.warning("APP_SECRET_MISSING production=false meta_signature_verification=disabled")
 
 # ── Conversation cache (Redis or in-memory) ───────────────────────────────────
 
@@ -225,6 +243,44 @@ def _resolve_groq_key(client) -> str:
     return key or GROQ_API_KEY
 
 
+def _is_production() -> bool:
+    return APP_ENV == "production"
+
+
+def _verify_meta_signature(request: Request, raw_body: bytes) -> None:
+    signature = request.headers.get("x-hub-signature-256", "")
+
+    if not APP_SECRET:
+        if _is_production():
+            logger.error("META_SIGNATURE_ERROR app_secret_missing")
+            raise HTTPException(status_code=403, detail="APP_SECRET is not configured")
+        logger.warning("META_SIGNATURE_WARNING app_secret_missing signature_skipped=true")
+        return
+
+    if not signature.startswith("sha256="):
+        logger.warning("META_SIGNATURE_ERROR signature_missing_or_malformed")
+        raise HTTPException(status_code=403, detail="Invalid Meta signature")
+
+    expected = "sha256=" + hmac.new(
+        APP_SECRET.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(signature, expected):
+        logger.warning("META_SIGNATURE_ERROR signature_mismatch")
+        raise HTTPException(status_code=403, detail="Invalid Meta signature")
+
+
+def _track_background_task(task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.warning("BACKGROUND_TASK_ERROR cancelled=true")
+    except Exception as exc:
+        logger.error("BACKGROUND_TASK_ERROR error=%s", exc, exc_info=True)
+
+
 # ── Debounce processor ────────────────────────────────────────────────────────
 
 async def process_after_debounce(
@@ -318,7 +374,7 @@ async def process_after_debounce(
                     await db.commit()
 
     except Exception as e:
-        logger.error("DEBOUNCE PROCESSOR ERROR: %s", e, exc_info=True)
+        logger.error("BACKGROUND_TASK_ERROR sender_id=%s error=%s", sender_id, e, exc_info=True)
 
 
 # ── Webhook ───────────────────────────────────────────────────────────────────
@@ -333,7 +389,20 @@ async def verify(request: Request):
 
 @app.post("/webhook")
 async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    body = await request.json()
+    raw_body = await request.body()
+    _verify_meta_signature(request, raw_body)
+
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        logger.warning("WEBHOOK_RECEIVED invalid_json=true")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    logger.info(
+        "WEBHOOK_RECEIVED object=%s entries=%s",
+        body.get("object"),
+        len(body.get("entry", [])),
+    )
     print(f"INCOMING: {body}")
     try:
         for entry in body.get("entry", []):
@@ -344,13 +413,21 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
             if db is not None:
                 client = await client_service.get_by_instagram_id(db, account_id)
                 if client is not None:
+                    logger.info(
+                        "CLIENT_RESOLVED source=db client_id=%s account_id=%s status=%s",
+                        client.id,
+                        account_id,
+                        client.status,
+                    )
                     print(f"CLIENT SOURCE: DB | id={client.id} | business={client.business_name} | prompt_len={len(client.system_prompt) if client.system_prompt else 0}")
 
             if client is None:
                 client = _get_legacy_client()
                 if client is None or client.instagram_account_id != account_id:
+                    logger.warning("CLIENT_RESOLVED source=none account_id=%s", account_id)
                     print(f"CLIENT SOURCE: NOT FOUND | account_id={account_id}")
                     continue
+                logger.info("CLIENT_RESOLVED source=legacy account_id=%s status=active", account_id)
                 print(f"CLIENT SOURCE: ENV (synthetic fallback) | account_id={account_id}")
 
             if client.status != "active" and not isinstance(client, _LegacyClient):
@@ -409,7 +486,7 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     message_text=text,
                     is_voice=is_voice,
                 )
-                asyncio.create_task(
+                task = asyncio.create_task(
                     process_after_debounce(
                         client=client,
                         sender_id=sender_id,
@@ -419,8 +496,10 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
                         whatsapp_link=whatsapp_link,
                     )
                 )
+                task.add_done_callback(_track_background_task)
 
     except Exception as e:
+        logger.error("WEBHOOK_ERROR error=%s", e, exc_info=True)
         print(f"WEBHOOK ERROR: {e}")
     return {"status": "ok"}
 
@@ -430,6 +509,23 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
 @app.get("/privacy", response_class=HTMLResponse)
 async def privacy():
     return "<h1>Privacy Policy</h1><p>We only process messages to respond to user inquiries.</p>"
+
+
+@app.get("/health")
+async def health():
+    db_configured = async_session_factory is not None
+    legacy_configured = bool(_LEGACY_INSTAGRAM_ACCOUNT_ID and _LEGACY_PAGE_ACCESS_TOKEN)
+    mode = "db" if db_configured else "legacy"
+
+    return {
+        "status": "ok",
+        "mode": mode,
+        "anthropic_configured": bool(ANTHROPIC_API_KEY),
+        "instagram_configured": bool(db_configured or legacy_configured),
+        "redis_configured": bool(REDIS_URL),
+        "db_configured": db_configured,
+        "app_secret_configured": bool(APP_SECRET),
+    }
 
 
 @app.get("/")

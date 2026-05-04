@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,7 @@ from app.db.database import get_db
 from app.services import client_service
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -26,8 +28,21 @@ async def create_client(body: dict[str, Any], db: AsyncSession = Depends(get_db)
     missing = required - body.keys()
     if missing:
         raise HTTPException(422, f"Missing fields: {missing}")
-    client = await client_service.create(db, dict(body))
-    return _client_dict(client)
+    data = dict(body)
+    data.setdefault("status", "active")
+    client = await client_service.create(db, data)
+    response = _client_dict(client)
+    if client.status == "trial":
+        logger.warning(
+            "CLIENT_CREATED_TRIAL_WARNING client_id=%s instagram_account_id=%s",
+            client.id,
+            client.instagram_account_id,
+        )
+        response["warning"] = (
+            "Client status is trial; webhook processes only active clients. "
+            "Activate with PATCH /admin/clients/{client_id} body {\"status\":\"active\"}."
+        )
+    return response
 
 
 @router.get("/clients", dependencies=[Depends(_require_admin)])
