@@ -8,7 +8,7 @@ async def transcribe_audio(audio_url: str, groq_api_key: str) -> str | None:
     if not groq_api_key:
         print("GROQ: api key not provided, skipping transcription")
         return None
-    print(f"TRANSCRIBING AUDIO: {audio_url}")
+    print("TRANSCRIBING AUDIO: <url_redacted>")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(audio_url)
@@ -20,7 +20,7 @@ async def transcribe_audio(audio_url: str, groq_api_key: str) -> str | None:
             file=("audio.ogg", audio_bytes),
         )
         text = transcription.text.strip()
-        print(f"TRANSCRIPTION RESULT: {text}")
+        print(f"TRANSCRIPTION RESULT: len={len(text)}")
         return text if text else None
     except Exception as e:
         print(f"GROQ ERROR: {type(e).__name__}: {e}")

@@ -6,8 +6,6 @@ import hmac
 import json
 import logging
 import os
-from datetime import datetime
-import pytz
 import httpx
 from fastapi import Depends, FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
@@ -248,7 +246,17 @@ def _is_production() -> bool:
 
 
 def _verify_meta_signature(request: Request, raw_body: bytes) -> None:
-    return
+    if not APP_SECRET:
+        logger.warning("META_SIG_SKIP app_secret_not_configured")
+        return
+    signature = request.headers.get("x-hub-signature-256", "")
+    if not signature.startswith("sha256="):
+        raise HTTPException(status_code=403, detail="Missing Meta signature")
+    expected = "sha256=" + hmac.new(
+        APP_SECRET.encode(), raw_body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=403, detail="Invalid Meta signature")
 
 
 def _track_background_task(task: asyncio.Task) -> None:
@@ -382,7 +390,7 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
         body.get("object"),
         len(body.get("entry", [])),
     )
-    print(f"INCOMING: {body}")
+    logger.debug("INCOMING: %s", body)
     try:
         for entry in body.get("entry", []):
             account_id = entry.get("id")
@@ -456,7 +464,7 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
                     print("SKIP: no text or supported attachment")
                     continue
 
-                print(f"MSG FROM {sender_id}{' (voice)' if is_voice else ''}: {text}")
+                logger.info("MSG_RECEIVED sender_id=%s voice=%s len=%d", sender_id, is_voice, len(text))
 
                 # ── Debounce: buffer message, schedule processing ──────────
                 my_ts = await _debounce.add_message_to_buffer(
@@ -492,19 +500,7 @@ async def privacy():
 
 @app.get("/health")
 async def health():
-    db_configured = async_session_factory is not None
-    legacy_configured = bool(_LEGACY_INSTAGRAM_ACCOUNT_ID and _LEGACY_PAGE_ACCESS_TOKEN)
-    mode = "db" if db_configured else "legacy"
-
-    return {
-        "status": "ok",
-        "mode": mode,
-        "anthropic_configured": bool(ANTHROPIC_API_KEY),
-        "instagram_configured": bool(db_configured or legacy_configured),
-        "redis_configured": bool(REDIS_URL),
-        "db_configured": db_configured,
-        "app_secret_configured": bool(APP_SECRET),
-    }
+    return {"status": "ok"}
 
 
 @app.get("/")

@@ -1,3 +1,4 @@
+import hmac
 import os
 import logging
 from typing import Any
@@ -14,7 +15,7 @@ router = APIRouter()
 
 
 def _require_admin(x_admin_key: str = Header(...)):
-    if not ADMIN_API_KEY or x_admin_key != ADMIN_API_KEY:
+    if not ADMIN_API_KEY or not hmac.compare_digest(x_admin_key, ADMIN_API_KEY):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin key")
 
 

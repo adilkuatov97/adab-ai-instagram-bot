@@ -89,7 +89,6 @@ async def ask_claude(
             messages=history,
         )
         raw_text = response.content[0].text.strip()
-        print(f"CLAUDE RAW: {raw_text}")
         raw = _extract_json(raw_text)
 
         parsed = json.loads(raw)
@@ -97,7 +96,7 @@ async def ask_claude(
         temperature = parsed.get("lead_temperature", "cold")
         is_hot_lead = temperature in ("hot", "warm")
 
-        print(f"CLAUDE REPLY: {reply} | TEMP: {temperature} | HOT: {is_hot_lead}")
+        logger.info("CLAUDE_OK sender_id=%s temp=%s hot=%s reply_len=%d", sender_id, temperature, is_hot_lead, len(reply))
         return reply, is_hot_lead, temperature
 
     except json.JSONDecodeError:
