@@ -9,6 +9,7 @@ from app.db.database import get_db
 from app.services import client_service
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+REDIS_URL = os.getenv("REDIS_URL", "")
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -100,6 +101,22 @@ async def get_conversations(client_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(503, "Database not configured")
     convs = await client_service.get_conversations(db, client_id)
     return [_conv_dict(c) for c in convs]
+
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
+
+@router.delete("/flush-cache/{client_id}", dependencies=[Depends(_require_admin)])
+async def flush_cache(client_id: str):
+    if not REDIS_URL:
+        raise HTTPException(503, "Redis not configured")
+    try:
+        import redis as redis_lib
+        r = redis_lib.from_url(REDIS_URL, decode_responses=True)
+        keys = r.keys(f"conv:{client_id}:*")
+        deleted = r.delete(*keys) if keys else 0
+        return {"deleted_keys": deleted, "client_id": client_id}
+    except Exception as e:
+        raise HTTPException(500, f"Redis error: {e}")
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────
