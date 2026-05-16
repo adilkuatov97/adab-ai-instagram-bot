@@ -3,8 +3,8 @@
 ## Переменные
 ```bash
 BASE_URL="https://adab-ai-instagram-bot.onrender.com"
-ADMIN_KEY="_3SiU7s2Wej-9q1sI8y3zJ6d_dWIO4ZCNeZh6dyDPQk"
-CLIENT_ID="b763a385-06f4-4dbc-8828-41c9cf56c483"
+ADMIN_KEY="<your-admin-api-key>"
+CLIENT_ID="<your-client-uuid>"
 ```
 
 ---
