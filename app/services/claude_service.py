@@ -14,6 +14,11 @@ SAFE_CLAUDE_FALLBACK = "Здравствуйте! Сейчас менеджер 
 
 logger = logging.getLogger(__name__)
 
+# Module-level async singleton — created once, reused for every call
+_anthropic_client: anthropic.AsyncAnthropic | None = (
+    anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+)
+
 
 def _extract_json(raw: str) -> str:
     """Strip markdown fences and any leading/trailing text outside the JSON object."""
@@ -77,15 +82,14 @@ async def ask_claude(
     history = conversation_history[-10:]
 
     try:
-        if not ANTHROPIC_API_KEY:
+        if not _anthropic_client:
             logger.error("CLAUDE_ERROR anthropic_api_key_missing sender_id=%s", sender_id)
             return SAFE_CLAUDE_FALLBACK, False, "cold"
 
-        anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        response = anthropic_client.messages.create(
+        response = await _anthropic_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=500,
-            system=full_system,
+            system=[{"type": "text", "text": full_system, "cache_control": {"type": "ephemeral"}}],
             messages=history,
         )
         raw_text = response.content[0].text.strip()

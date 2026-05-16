@@ -67,51 +67,39 @@ async def startup_checks():
 # ── Conversation cache (Redis or in-memory) ───────────────────────────────────
 
 class _ConversationStore:
-    """Redis-backed cache with in-memory fallback. Key: '{client_id}:{user_id}'"""
+    """Async Redis-backed cache with in-memory fallback. Key: '{client_id}:{user_id}'"""
 
     def __init__(self):
-        self._client = None
+        self._redis = None
         self._fallback: dict = {}
-        self._failed = False
         self._seen_mids: set = set()
-
-    def _connect(self):
-        if self._client is not None:
-            return self._client
-        if not REDIS_URL or self._failed:
-            return None
-        try:
-            import redis
-            c = redis.from_url(REDIS_URL, decode_responses=True)
-            c.ping()
-            self._client = c
-            print("REDIS: connected")
-        except Exception as e:
-            print(f"REDIS WARNING: {type(e).__name__}: {e}, using in-memory")
-            self._failed = True
-        return self._client
-
-    def get(self, key: str) -> list:
-        r = self._connect()
-        if r:
+        if REDIS_URL:
             try:
-                raw = r.get(f"conv:{key}")
+                import redis.asyncio as aioredis
+                self._redis = aioredis.from_url(REDIS_URL, decode_responses=True)
+                logger.info("CONV_STORE aioredis_client_initialized")
+            except Exception as e:
+                logger.warning("CONV_STORE aioredis_init_failed error=%s using_memory=true", e)
+
+    async def get(self, key: str) -> list:
+        if self._redis is not None:
+            try:
+                raw = await self._redis.get(f"conv:{key}")
                 return json.loads(raw)[-20:] if raw else []
             except Exception as e:
-                print(f"REDIS GET ERROR: {e}")
+                logger.warning("CONV_STORE get_error error=%s", e)
         return list(self._fallback.get(key, []))[-20:]
 
-    def is_seen(self, mid: str) -> bool:
+    async def is_seen(self, mid: str) -> bool:
         """Return True if mid was already processed (duplicate). Marks it seen atomically."""
-        r = self._connect()
-        if r:
+        if self._redis is not None:
             try:
-                added = r.setnx(f"seen:{mid}", "1")
+                added = await self._redis.setnx(f"seen:{mid}", "1")
                 if added:
-                    r.expire(f"seen:{mid}", 86400)
+                    await self._redis.expire(f"seen:{mid}", 86400)
                 return not bool(added)
             except Exception as e:
-                print(f"REDIS SETNX ERROR: {e}")
+                logger.warning("CONV_STORE setnx_error error=%s", e)
         if mid in self._seen_mids:
             return True
         self._seen_mids.add(mid)
@@ -119,18 +107,17 @@ class _ConversationStore:
             self._seen_mids.clear()
         return False
 
-    def append(self, key: str, role: str, content: str):
-        r = self._connect()
-        if r:
+    async def append(self, key: str, role: str, content: str):
+        if self._redis is not None:
             try:
                 cache_key = f"conv:{key}"
-                raw = r.get(cache_key)
+                raw = await self._redis.get(cache_key)
                 history = json.loads(raw) if raw else []
                 history.append({"role": role, "content": content})
-                r.set(cache_key, json.dumps(history), ex=REDIS_TTL)
+                await self._redis.set(cache_key, json.dumps(history), ex=REDIS_TTL)
                 return
             except Exception as e:
-                print(f"REDIS SET ERROR: {e}")
+                logger.warning("CONV_STORE set_error error=%s", e)
         if key not in self._fallback:
             self._fallback[key] = []
         self._fallback[key].append({"role": role, "content": content})
@@ -314,14 +301,14 @@ async def process_after_debounce(
                     )
 
         # ── Cache: add combined user turn, get history for Claude ─────────────
-        _store.append(cache_key, "user", combined_text)
-        history = _store.get(cache_key)
+        await _store.append(cache_key, "user", combined_text)
+        history = await _store.get(cache_key)
 
         # ── Claude ────────────────────────────────────────────────────────────
         reply, is_hot_lead, temperature = await ask_claude(
             sender_id, combined_text, client, history
         )
-        _store.append(cache_key, "assistant", reply)
+        await _store.append(cache_key, "assistant", reply)
 
         # ── DB: save assistant reply + lead ───────────────────────────────────
         lead_id = None
@@ -342,7 +329,7 @@ async def process_after_debounce(
 
         # ── Telegram notification + mark lead notified ────────────────────────
         if is_hot_lead:
-            recent = _store.get(cache_key)
+            recent = await _store.get(cache_key)
             await send_lead_notification(
                 sender_id=sender_id,
                 ai_reply=reply,
@@ -441,7 +428,7 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
                 msg = messaging.get("message", {})
                 mid = msg.get("mid", "")
-                if mid and _store.is_seen(mid):
+                if mid and await _store.is_seen(mid):
                     print(f"SKIP: duplicate mid={mid}")
                     continue
 
