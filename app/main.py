@@ -17,11 +17,13 @@ from app.db.database import get_db, async_session_factory
 from app.db.models import Client, Lead
 from app.services import client_service
 from app.services.claude_service import ask_claude
+from app.services.conversation_store import ConversationStore
 from app.services.crypto_service import decrypt
 from app.services.debounce_service import DebounceService, DEBOUNCE_DELAY
 from app.services.instagram_service import send_message
 from app.services.telegram_service import send_lead_notification
 from app.services.voice_service import transcribe_audio
+from app.whatsapp_routes import router as whatsapp_router
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,6 @@ _LEGACY_TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_MANAGER_CHAT_ID", "")
 _LEGACY_GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 REDIS_URL = os.getenv("REDIS_URL", "")
-REDIS_TTL = 30 * 24 * 60 * 60
 
 _debounce = DebounceService(REDIS_URL)
 
@@ -55,6 +56,7 @@ _debounce = DebounceService(REDIS_URL)
 
 app = FastAPI(title="Adab AI Instagram Bot")
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
+app.include_router(whatsapp_router, prefix="/whatsapp", tags=["whatsapp"])
 
 
 @app.on_event("startup")
@@ -66,64 +68,7 @@ async def startup_checks():
 
 # ── Conversation cache (Redis or in-memory) ───────────────────────────────────
 
-class _ConversationStore:
-    """Async Redis-backed cache with in-memory fallback. Key: '{client_id}:{user_id}'"""
-
-    def __init__(self):
-        self._redis = None
-        self._fallback: dict = {}
-        self._seen_mids: set = set()
-        if REDIS_URL:
-            try:
-                import redis.asyncio as aioredis
-                self._redis = aioredis.from_url(REDIS_URL, decode_responses=True)
-                logger.info("CONV_STORE aioredis_client_initialized")
-            except Exception as e:
-                logger.warning("CONV_STORE aioredis_init_failed error=%s using_memory=true", e)
-
-    async def get(self, key: str) -> list:
-        if self._redis is not None:
-            try:
-                raw = await self._redis.get(f"conv:{key}")
-                return json.loads(raw)[-20:] if raw else []
-            except Exception as e:
-                logger.warning("CONV_STORE get_error error=%s", e)
-        return list(self._fallback.get(key, []))[-20:]
-
-    async def is_seen(self, mid: str) -> bool:
-        """Return True if mid was already processed (duplicate). Marks it seen atomically."""
-        if self._redis is not None:
-            try:
-                added = await self._redis.setnx(f"seen:{mid}", "1")
-                if added:
-                    await self._redis.expire(f"seen:{mid}", 86400)
-                return not bool(added)
-            except Exception as e:
-                logger.warning("CONV_STORE setnx_error error=%s", e)
-        if mid in self._seen_mids:
-            return True
-        self._seen_mids.add(mid)
-        if len(self._seen_mids) > 10000:
-            self._seen_mids.clear()
-        return False
-
-    async def append(self, key: str, role: str, content: str):
-        if self._redis is not None:
-            try:
-                cache_key = f"conv:{key}"
-                raw = await self._redis.get(cache_key)
-                history = json.loads(raw) if raw else []
-                history.append({"role": role, "content": content})
-                await self._redis.set(cache_key, json.dumps(history), ex=REDIS_TTL)
-                return
-            except Exception as e:
-                logger.warning("CONV_STORE set_error error=%s", e)
-        if key not in self._fallback:
-            self._fallback[key] = []
-        self._fallback[key].append({"role": role, "content": content})
-
-
-_store = _ConversationStore()
+_store = ConversationStore(REDIS_URL)
 
 # ── Legacy fallback client ────────────────────────────────────────────────────
 
