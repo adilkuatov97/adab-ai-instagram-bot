@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Update a client's system_prompt in the DB from a plain-text file.
+"""Update a client's system_prompt (or whatsapp_system_prompt) in the DB from a plain-text file.
 
 Usage:
     python3 scripts/set_client_prompt.py <client_uuid> <path/to/prompt.txt>
+    python3 scripts/set_client_prompt.py --whatsapp <client_uuid> <path/to/prompt.txt>
 
-Example:
+Examples:
     python3 scripts/set_client_prompt.py f17a14f4-124a-439a-b3ae-0911ea007037 prompts/adab_ai_agency.txt
+    python3 scripts/set_client_prompt.py --whatsapp f17a14f4-124a-439a-b3ae-0911ea007037 prompts/adab_ai_agency_whatsapp.txt
 """
 import asyncio
 import os
@@ -19,12 +21,18 @@ load_dotenv()
 
 
 async def main() -> None:
-    if len(sys.argv) != 3:
-        print("Usage: python3 scripts/set_client_prompt.py <client_id> <prompt_file>")
+    args = sys.argv[1:]
+
+    use_whatsapp = False
+    if args and args[0] == "--whatsapp":
+        use_whatsapp = True
+        args = args[1:]
+
+    if len(args) != 2:
+        print("Usage: python3 scripts/set_client_prompt.py [--whatsapp] <client_id> <prompt_file>")
         sys.exit(1)
 
-    client_id = sys.argv[1]
-    prompt_path = sys.argv[2]
+    client_id, prompt_path = args
 
     if not os.path.exists(prompt_path):
         print(f"Error: file not found: {prompt_path}")
@@ -38,22 +46,24 @@ async def main() -> None:
         print("Error: DIRECT_DATABASE_URL not set in .env")
         sys.exit(1)
 
+    column = "whatsapp_system_prompt" if use_whatsapp else "system_prompt"
     engine = create_async_engine(db_url, connect_args={"statement_cache_size": 0})
     async with engine.begin() as conn:
         result = await conn.execute(
             text(
-                "UPDATE clients SET system_prompt = :prompt, updated_at = NOW() "
+                f"UPDATE clients SET {column} = :prompt, updated_at = NOW() "
                 "WHERE id = CAST(:client_id AS UUID) RETURNING id"
             ),
             {"prompt": prompt, "client_id": client_id},
         )
         not_found = result.rowcount == 0
     await engine.dispose()
+
     if not_found:
         print(f"Error: client {client_id} not found")
         sys.exit(1)
 
-    print(f"Updated client {client_id}: prompt {len(prompt)} chars")
+    print(f"Updated client {client_id}: {column} = {len(prompt)} chars")
 
 
 asyncio.run(main())

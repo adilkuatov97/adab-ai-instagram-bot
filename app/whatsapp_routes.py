@@ -65,9 +65,17 @@ async def whatsapp_message(
         await _store.append(cache_key, "user", body.message)
         history = await _store.get(cache_key)
 
-        # 4. Call Claude
+        # 4. Call Claude — prefer whatsapp_system_prompt, fallback to system_prompt
+        if client.whatsapp_system_prompt:
+            logger.info("WHATSAPP_PROMPT using=whatsapp_system_prompt client_id=%s", body.client_id)
+            prompt_override = client.whatsapp_system_prompt
+        else:
+            logger.info("WHATSAPP_PROMPT using=system_prompt (fallback) client_id=%s", body.client_id)
+            prompt_override = None
+
         reply, is_hot_lead, temperature = await ask_claude(
-            body.phone, body.message, client, history
+            body.phone, body.message, client, history,
+            system_prompt_override=prompt_override,
         )
 
         # 5. Save assistant reply to Redis

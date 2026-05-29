@@ -43,13 +43,16 @@ async def ask_claude(
     user_text: str,
     client: Client,
     conversation_history: list[dict],
+    system_prompt_override: str | None = None,
 ) -> tuple[str, bool, str]:
     """
     Returns (reply, is_hot_lead, temperature).
     conversation_history: list of {role, content} dicts for this sender.
+    system_prompt_override: if provided, replaces client.system_prompt.
     """
     whatsapp_link = client.whatsapp_link or ""
-    system_prompt = (client.system_prompt or "").replace("{whatsapp_link}", whatsapp_link)
+    raw_prompt = system_prompt_override if system_prompt_override is not None else (client.system_prompt or "")
+    system_prompt = raw_prompt.replace("{whatsapp_link}", whatsapp_link)
 
     # Inject whatsapp_link into the format instruction at the end of the prompt
     format_block = f"""

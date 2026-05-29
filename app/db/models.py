@@ -28,6 +28,7 @@ class Client(Base):
     instagram_username = Column(String, nullable=True)
     instagram_access_token_encrypted = Column(Text, nullable=False)
     system_prompt = Column(Text, nullable=True)
+    whatsapp_system_prompt = Column(Text, nullable=True)
     whatsapp_link = Column(String, nullable=True)
     telegram_manager_chat_id = Column(String, nullable=True)
     groq_api_key_encrypted = Column(Text, nullable=True)
