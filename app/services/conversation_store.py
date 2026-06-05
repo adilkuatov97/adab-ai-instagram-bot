@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "")
 REDIS_TTL = 30 * 24 * 60 * 60
+SEEN_TTL = 24 * 60 * 60
 
 
 class ConversationStore:
@@ -50,6 +51,19 @@ class ConversationStore:
         if len(self._seen_mids) > 10000:
             self._seen_mids.clear()
         return False
+
+    async def mark_once_redis(self, key: str, ttl_seconds: int = SEEN_TTL) -> bool | None:
+        """Return True when key is newly marked, False for duplicate, None when Redis is unavailable."""
+        if self._redis is None:
+            return None
+        try:
+            added = await self._redis.setnx(key, "1")
+            if added:
+                await self._redis.expire(key, ttl_seconds)
+            return bool(added)
+        except Exception as e:
+            logger.warning("CONV_STORE mark_once_redis_error error=%s", e)
+            return None
 
     async def append(self, key: str, role: str, content: str) -> None:
         if self._redis is not None:
