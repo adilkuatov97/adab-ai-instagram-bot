@@ -136,6 +136,64 @@ async def list_outbox_items(limit: int = 20) -> list[WhatsAppCloudOutboxItem]:
     return items
 
 
+async def delete_outbox_item(item_id: str) -> None:
+    redis = await _get_redis_client()
+    if redis is None:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_DELETE_SKIP redis_available=false")
+        return
+
+    try:
+        await redis.delete(_item_key(item_id))
+        await redis.zrem(FAILED_OUTBOX_ZSET_KEY, item_id)
+        logger.info("WHATSAPP_CLOUD_OUTBOX_DELETE_OK item_id=%s", item_id)
+    except Exception as exc:
+        logger.warning(
+            "WHATSAPP_CLOUD_OUTBOX_DELETE_ERROR item_id=%s error=%s",
+            item_id,
+            exc.__class__.__name__,
+        )
+
+
+async def increment_outbox_item_attempts(item_id: str, last_error: str) -> None:
+    item = await load_outbox_item(item_id)
+    if item is None:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_INCREMENT_SKIP item_found=false item_id=%s", item_id)
+        return
+
+    redis = await _get_redis_client()
+    if redis is None:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_INCREMENT_SKIP redis_available=false")
+        return
+
+    updated = WhatsAppCloudOutboxItem(
+        id=item.id,
+        client_id=item.client_id,
+        wa_id=item.wa_id,
+        send_to=item.send_to,
+        phone_number_id=item.phone_number_id,
+        message_id=item.message_id,
+        reply_text=item.reply_text,
+        created_at=item.created_at,
+        last_error=_truncate_error(last_error),
+        attempts=item.attempts + 1,
+    )
+
+    try:
+        await redis.set(_item_key(item_id), serialize_outbox_item(updated))
+        await redis.zadd(FAILED_OUTBOX_ZSET_KEY, {item_id: int(time.time() * 1000)})
+        logger.info(
+            "WHATSAPP_CLOUD_OUTBOX_INCREMENT_OK item_id=%s attempts=%d",
+            item_id,
+            updated.attempts,
+        )
+    except Exception as exc:
+        logger.warning(
+            "WHATSAPP_CLOUD_OUTBOX_INCREMENT_ERROR item_id=%s error=%s",
+            item_id,
+            exc.__class__.__name__,
+        )
+
+
 async def _get_redis_client():
     global _redis_checked, _redis_client
 
@@ -191,3 +249,7 @@ def _required_int(data: dict[str, Any], key: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ValueError(f"Missing int field: {key}")
     return value
+
+
+def _truncate_error(last_error: str) -> str:
+    return last_error.replace("\n", " ").replace("\r", " ").strip()[:500]
