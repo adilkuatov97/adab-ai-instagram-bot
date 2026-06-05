@@ -12,9 +12,11 @@ from app.whatsapp_cloud_routes import (
     WhatsAppCloudInboundTextMessage,
     _extract_text_messages,
     _extract_webhook_metadata,
+    _get_processing_config,
     _is_valid_signature,
     _mark_message_for_processing,
     _send_whatsapp_cloud_reply,
+    resolve_whatsapp_cloud_client_id,
     resolve_whatsapp_cloud_send_to,
 )
 
@@ -211,7 +213,7 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
         )
         config = WhatsAppCloudConfig(
             access_token="test-token",
-            default_client_id="client-id",
+            client_id="client-id",
             phone_number_id="12345",
             api_version="v25.0",
         )
@@ -234,6 +236,90 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
             access_token="test-token",
             api_version="v25.0",
         )
+
+    def test_client_map_returns_mapped_client_id(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_CLIENT_MAP": (
+                    "1175403148986567:f17a14f4-124a-439a-b3ae-0911ea007037"
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_whatsapp_cloud_client_id("1175403148986567"),
+                "f17a14f4-124a-439a-b3ae-0911ea007037",
+            )
+
+    def test_client_map_trims_whitespace(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_CLIENT_MAP": (
+                    " 1175403148986567 : f17a14f4-124a-439a-b3ae-0911ea007037 "
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_whatsapp_cloud_client_id("1175403148986567"),
+                "f17a14f4-124a-439a-b3ae-0911ea007037",
+            )
+
+    def test_client_map_ignores_malformed_pairs(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_CLIENT_MAP": (
+                    "broken,no-target:, :no-source,1175403148986567:client-id"
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_whatsapp_cloud_client_id("broken"),
+                None,
+            )
+            self.assertEqual(
+                resolve_whatsapp_cloud_client_id("1175403148986567"),
+                "client-id",
+            )
+
+    def test_client_map_falls_back_to_default_client_id(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_CLIENT_MAP": "other-phone:other-client",
+                "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID": "default-client",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_whatsapp_cloud_client_id("1175403148986567"),
+                "default-client",
+            )
+
+    def test_client_map_returns_none_without_map_or_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(resolve_whatsapp_cloud_client_id("1175403148986567"))
+
+    def test_processing_config_uses_mapped_client_id(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_ACCESS_TOKEN": "test-token",
+                "WHATSAPP_CLOUD_CLIENT_MAP": "1175403148986567:mapped-client",
+                "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID": "default-client",
+                "WHATSAPP_CLOUD_API_VERSION": "v25.0",
+            },
+            clear=True,
+        ):
+            config = _get_processing_config("1175403148986567")
+
+        self.assertIsNotNone(config)
+        self.assertEqual(config.client_id, "mapped-client")
+        self.assertEqual(config.phone_number_id, "1175403148986567")
 
 
 if __name__ == "__main__":
