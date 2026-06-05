@@ -3,13 +3,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import os
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from app.whatsapp_cloud_routes import (
+    WhatsAppCloudConfig,
+    WhatsAppCloudInboundTextMessage,
     _extract_text_messages,
     _extract_webhook_metadata,
     _is_valid_signature,
     _mark_message_for_processing,
+    _send_whatsapp_cloud_reply,
+    resolve_whatsapp_cloud_send_to,
 )
 
 
@@ -148,6 +154,86 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
 
     def test_duplicate_helper_continues_without_redis(self):
         self.assertTrue(asyncio.run(_mark_message_for_processing("wamid.no_redis")))
+
+    def test_recipient_override_missing_env_returns_original_wa_id(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                resolve_whatsapp_cloud_send_to("77780400008"),
+                "77780400008",
+            )
+
+    def test_recipient_override_mapping_returns_target(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES": (
+                    "77780400008:787780400008, 77715899999 : 787715899999"
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_whatsapp_cloud_send_to("77780400008"),
+                "787780400008",
+            )
+            self.assertEqual(
+                resolve_whatsapp_cloud_send_to("77715899999"),
+                "787715899999",
+            )
+
+    def test_recipient_override_ignores_malformed_pairs(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES": (
+                    "broken,no-target:, :no-source,77780400008:787780400008"
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                resolve_whatsapp_cloud_send_to("broken"),
+                "broken",
+            )
+            self.assertEqual(
+                resolve_whatsapp_cloud_send_to("77780400008"),
+                "787780400008",
+            )
+
+    def test_send_reply_uses_mapped_recipient_target(self):
+        message = WhatsAppCloudInboundTextMessage(
+            wa_id="77780400008",
+            message_id="wamid.test",
+            timestamp="1710000000",
+            message_type="text",
+            text_body="customer text",
+            phone_number_id="12345",
+        )
+        config = WhatsAppCloudConfig(
+            access_token="test-token",
+            default_client_id="client-id",
+            phone_number_id="12345",
+            api_version="v25.0",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"WHATSAPP_CLOUD_RECIPIENT_OVERRIDES": "77780400008:787780400008"},
+            clear=True,
+        ):
+            with patch(
+                "app.whatsapp_cloud_routes.send_whatsapp_cloud_text",
+                new=AsyncMock(),
+            ) as send_mock:
+                asyncio.run(_send_whatsapp_cloud_reply(message, "reply text", config))
+
+        send_mock.assert_awaited_once_with(
+            to="787780400008",
+            text="reply text",
+            phone_number_id="12345",
+            access_token="test-token",
+            api_version="v25.0",
+        )
 
 
 if __name__ == "__main__":

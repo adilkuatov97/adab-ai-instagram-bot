@@ -32,6 +32,7 @@ WHATSAPP_CLOUD_ACCESS_TOKEN_ENV = "WHATSAPP_CLOUD_ACCESS_TOKEN"
 WHATSAPP_CLOUD_PHONE_NUMBER_ID_ENV = "WHATSAPP_CLOUD_PHONE_NUMBER_ID"
 WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV = "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID"
 WHATSAPP_CLOUD_API_VERSION_ENV = "WHATSAPP_CLOUD_API_VERSION"
+WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV = "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES"
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 router = APIRouter()
@@ -70,6 +71,28 @@ def _get_env(name: str) -> str:
 
 def _get_cloud_api_version() -> str:
     return _get_env(WHATSAPP_CLOUD_API_VERSION_ENV) or DEFAULT_WHATSAPP_CLOUD_API_VERSION
+
+
+def resolve_whatsapp_cloud_send_to(wa_id: str) -> str:
+    overrides = _get_env(WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV)
+    if not overrides:
+        return wa_id
+
+    for raw_pair in overrides.split(","):
+        pair = raw_pair.strip()
+        if ":" not in pair:
+            continue
+
+        source, target = pair.split(":", 1)
+        source = source.strip()
+        target = target.strip()
+        if not source or not target:
+            continue
+
+        if source == wa_id:
+            return target
+
+    return wa_id
 
 
 def _get_processing_config(payload_phone_number_id: str | None) -> WhatsAppCloudConfig | None:
@@ -261,6 +284,21 @@ async def _mark_message_for_processing(message_id: str) -> bool:
     return True
 
 
+async def _send_whatsapp_cloud_reply(
+    message: WhatsAppCloudInboundTextMessage,
+    reply: str,
+    config: WhatsAppCloudConfig,
+) -> None:
+    send_to = resolve_whatsapp_cloud_send_to(message.wa_id)
+    await send_whatsapp_cloud_text(
+        to=send_to,
+        text=reply,
+        phone_number_id=config.phone_number_id,
+        access_token=config.access_token,
+        api_version=config.api_version,
+    )
+
+
 def _track_background_task(task: asyncio.Task) -> None:
     try:
         task.result()
@@ -369,13 +407,7 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
                 )
                 await db.commit()
 
-    await send_whatsapp_cloud_text(
-        to=message.wa_id,
-        text=reply,
-        phone_number_id=config.phone_number_id,
-        access_token=config.access_token,
-        api_version=config.api_version,
-    )
+    await _send_whatsapp_cloud_reply(message, reply, config)
 
     logger.info(
         "WHATSAPP_CLOUD_PROCESSING_OK client_id=%s wa_id=%s message_id=%s temp=%s hot=%s text_len=%d reply_len=%d",
