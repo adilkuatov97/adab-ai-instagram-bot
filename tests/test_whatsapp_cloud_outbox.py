@@ -7,7 +7,9 @@ from app.services import whatsapp_cloud_outbox
 from app.services.whatsapp_cloud_outbox import (
     FAILED_OUTBOX_ZSET_KEY,
     WhatsAppCloudOutboxItem,
+    delete_outbox_item,
     deserialize_outbox_item,
+    increment_outbox_item_attempts,
     list_outbox_items,
     load_outbox_item,
     save_failed_outbox_item,
@@ -22,6 +24,9 @@ class _FakeRedis:
 
     async def set(self, key, value):
         self.values[key] = value
+
+    async def delete(self, key):
+        self.values.pop(key, None)
 
     async def get(self, key):
         return self.values.get(key)
@@ -40,6 +45,9 @@ class _FakeRedis:
         else:
             selected = members[start : end + 1]
         return [member for member, _score in selected]
+
+    async def zrem(self, key, member):
+        self.zsets.get(key, {}).pop(member, None)
 
 
 class WhatsAppCloudOutboxTest(unittest.TestCase):
@@ -82,6 +90,26 @@ class WhatsAppCloudOutboxTest(unittest.TestCase):
         self.assertEqual(loaded, older)
         self.assertEqual([item.id for item in listed], ["newer", "older"])
         self.assertIn("older", self.fake_redis.zsets[FAILED_OUTBOX_ZSET_KEY])
+
+    def test_delete_outbox_item_removes_item_and_zset_member(self):
+        item = _item("delete-me")
+
+        asyncio.run(save_failed_outbox_item(item))
+        asyncio.run(delete_outbox_item("delete-me"))
+
+        self.assertIsNone(asyncio.run(load_outbox_item("delete-me")))
+        self.assertNotIn("delete-me", self.fake_redis.zsets[FAILED_OUTBOX_ZSET_KEY])
+
+    def test_increment_outbox_item_attempts_updates_error(self):
+        item = _item("retry-me")
+
+        asyncio.run(save_failed_outbox_item(item))
+        asyncio.run(increment_outbox_item_attempts("retry-me", "new error\nwith newline"))
+        updated = asyncio.run(load_outbox_item("retry-me"))
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.attempts, 2)
+        self.assertEqual(updated.last_error, "new error with newline")
 
 
 def _item(item_id: str, created_at: str = "2026-06-05T10:00:00+00:00"):

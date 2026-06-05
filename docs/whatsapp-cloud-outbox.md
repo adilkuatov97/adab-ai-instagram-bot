@@ -22,7 +22,7 @@ Failed item payload:
 whatsapp_cloud:outbox:failed:item:{id}
 ```
 
-The sorted set score is the outbox item creation timestamp in milliseconds.
+The initial sorted set score is the outbox item creation timestamp in milliseconds. Failed manual retries update the score to the current timestamp so recently retried failures appear first.
 
 ## Stored fields
 
@@ -49,6 +49,30 @@ Use the helper functions in `app/services/whatsapp_cloud_outbox.py`:
 - `list_outbox_items(limit=20)`
 
 Manual Redis inspection can also read the sorted set and item keys above.
+
+You can also use the CLI:
+
+```bash
+python -m app.scripts.whatsapp_cloud_outbox list
+python -m app.scripts.whatsapp_cloud_outbox retry <item_id>
+```
+
+The `list` command prints safe metadata only and does not print `reply_text`.
+
+## Retry behavior
+
+On retry success:
+
+- the message is sent via the official WhatsApp Cloud API
+- the outbox item key is deleted
+- the item id is removed from `whatsapp_cloud:outbox:failed:zset`
+
+On retry failure:
+
+- the item remains in Redis
+- `attempts` is incremented
+- `last_error` is updated with a safe string capped at 500 characters
+- the sorted set score is updated to the current timestamp so recently retried failures appear first
 
 ## Limitations
 
