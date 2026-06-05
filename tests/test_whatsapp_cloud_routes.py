@@ -16,9 +16,11 @@ from app.whatsapp_cloud_routes import (
     _is_valid_signature,
     _mark_message_for_processing,
     _send_whatsapp_cloud_reply,
+    _send_whatsapp_cloud_reply_with_outbox,
     resolve_whatsapp_cloud_client_id,
     resolve_whatsapp_cloud_send_to,
 )
+from app.services.whatsapp_cloud_service import WhatsAppCloudSendError
 
 
 class WhatsAppCloudRoutesTest(unittest.TestCase):
@@ -320,6 +322,89 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
         self.assertIsNotNone(config)
         self.assertEqual(config.client_id, "mapped-client")
         self.assertEqual(config.phone_number_id, "1175403148986567")
+
+    def test_failed_send_creates_outbox_item(self):
+        message = WhatsAppCloudInboundTextMessage(
+            wa_id="77780400008",
+            message_id="wamid.test",
+            timestamp="1710000000",
+            message_type="text",
+            text_body="customer text",
+            phone_number_id="12345",
+        )
+        config = WhatsAppCloudConfig(
+            access_token="test-token",
+            client_id="client-id",
+            phone_number_id="12345",
+            api_version="v25.0",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"WHATSAPP_CLOUD_RECIPIENT_OVERRIDES": "77780400008:787780400008"},
+            clear=True,
+        ):
+            with patch(
+                "app.whatsapp_cloud_routes.send_whatsapp_cloud_text",
+                new=AsyncMock(side_effect=WhatsAppCloudSendError("status=400")),
+            ):
+                with patch(
+                    "app.whatsapp_cloud_routes.save_failed_outbox_item",
+                    new=AsyncMock(),
+                ) as save_mock:
+                    with self.assertRaises(WhatsAppCloudSendError):
+                        asyncio.run(
+                            _send_whatsapp_cloud_reply_with_outbox(
+                                message,
+                                "reply text",
+                                config,
+                            )
+                        )
+
+        save_mock.assert_awaited_once()
+        item = save_mock.call_args.args[0]
+        self.assertEqual(item.client_id, "client-id")
+        self.assertEqual(item.wa_id, "77780400008")
+        self.assertEqual(item.send_to, "787780400008")
+        self.assertEqual(item.phone_number_id, "12345")
+        self.assertEqual(item.message_id, "wamid.test")
+        self.assertEqual(item.reply_text, "reply text")
+        self.assertEqual(item.attempts, 1)
+        self.assertIn("WhatsAppCloudSendError", item.last_error)
+
+    def test_successful_send_does_not_create_outbox_item(self):
+        message = WhatsAppCloudInboundTextMessage(
+            wa_id="77780400008",
+            message_id="wamid.test",
+            timestamp="1710000000",
+            message_type="text",
+            text_body="customer text",
+            phone_number_id="12345",
+        )
+        config = WhatsAppCloudConfig(
+            access_token="test-token",
+            client_id="client-id",
+            phone_number_id="12345",
+            api_version="v25.0",
+        )
+
+        with patch(
+            "app.whatsapp_cloud_routes.send_whatsapp_cloud_text",
+            new=AsyncMock(),
+        ):
+            with patch(
+                "app.whatsapp_cloud_routes.save_failed_outbox_item",
+                new=AsyncMock(),
+            ) as save_mock:
+                asyncio.run(
+                    _send_whatsapp_cloud_reply_with_outbox(
+                        message,
+                        "reply text",
+                        config,
+                    )
+                )
+
+        save_mock.assert_not_awaited()
 
 
 if __name__ == "__main__":
