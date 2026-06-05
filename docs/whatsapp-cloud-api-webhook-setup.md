@@ -41,6 +41,8 @@ Optional for future outbound Cloud API replies:
 ```text
 WHATSAPP_CLOUD_ACCESS_TOKEN=
 WHATSAPP_CLOUD_PHONE_NUMBER_ID=
+WHATSAPP_CLOUD_DEFAULT_CLIENT_ID=
+WHATSAPP_CLOUD_API_VERSION=v25.0
 ```
 
 The app still starts when these variables are missing. Missing values only affect the new WhatsApp Cloud API webhook routes.
@@ -73,3 +75,5 @@ After callback verification succeeds:
 ## Next step
 
 Process inbound text messages from WhatsApp Cloud API, map them to a client/business, call Claude with the WhatsApp prompt, persist the conversation, notify managers for hot leads, and send replies via the official Cloud API.
+
+For the current text-processing MVP, see [WhatsApp Cloud API Text Processing](./whatsapp-cloud-api-processing.md).
