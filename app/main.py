@@ -23,6 +23,7 @@ from app.services.debounce_service import DebounceService, DEBOUNCE_DELAY
 from app.services.instagram_service import send_message
 from app.services.telegram_service import send_lead_notification
 from app.services.voice_service import transcribe_audio
+from app.whatsapp_cloud_routes import router as whatsapp_cloud_router
 from app.whatsapp_routes import router as whatsapp_router
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ _debounce = DebounceService(REDIS_URL)
 app = FastAPI(title="Adab AI Instagram Bot")
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
 app.include_router(whatsapp_router, prefix="/whatsapp", tags=["whatsapp"])
+app.include_router(whatsapp_cloud_router, prefix="/whatsapp/cloud", tags=["whatsapp-cloud"])
 
 
 @app.on_event("startup")
