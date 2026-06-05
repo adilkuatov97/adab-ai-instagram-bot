@@ -6,7 +6,9 @@ import hmac
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -19,8 +21,13 @@ from app.services import client_service
 from app.services.claude_service import ask_claude
 from app.services.conversation_store import ConversationStore
 from app.services.telegram_service import send_lead_notification
+from app.services.whatsapp_cloud_outbox import (
+    WhatsAppCloudOutboxItem,
+    save_failed_outbox_item,
+)
 from app.services.whatsapp_cloud_service import (
     DEFAULT_WHATSAPP_CLOUD_API_VERSION,
+    WhatsAppCloudSendError,
     send_whatsapp_cloud_text,
 )
 
@@ -327,6 +334,45 @@ async def _send_whatsapp_cloud_reply(
     )
 
 
+async def _send_whatsapp_cloud_reply_with_outbox(
+    message: WhatsAppCloudInboundTextMessage,
+    reply: str,
+    config: WhatsAppCloudConfig,
+) -> None:
+    try:
+        await _send_whatsapp_cloud_reply(message, reply, config)
+    except WhatsAppCloudSendError as exc:
+        await _save_failed_send_to_outbox(message, reply, config, exc)
+        raise
+
+
+async def _save_failed_send_to_outbox(
+    message: WhatsAppCloudInboundTextMessage,
+    reply: str,
+    config: WhatsAppCloudConfig,
+    exc: Exception,
+) -> None:
+    item = WhatsAppCloudOutboxItem(
+        id=str(uuid.uuid4()),
+        client_id=config.client_id,
+        wa_id=message.wa_id,
+        send_to=resolve_whatsapp_cloud_send_to(message.wa_id),
+        phone_number_id=config.phone_number_id,
+        message_id=message.message_id,
+        reply_text=reply,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        last_error=_safe_outbox_error(exc),
+        attempts=1,
+    )
+    await save_failed_outbox_item(item)
+
+
+def _safe_outbox_error(exc: Exception) -> str:
+    message = str(exc).replace("\n", " ").replace("\r", " ").strip()
+    safe_error = f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
+    return safe_error[:500]
+
+
 def _track_background_task(task: asyncio.Task) -> None:
     try:
         task.result()
@@ -435,7 +481,7 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
                 )
                 await db.commit()
 
-    await _send_whatsapp_cloud_reply(message, reply, config)
+    await _send_whatsapp_cloud_reply_with_outbox(message, reply, config)
 
     logger.info(
         "WHATSAPP_CLOUD_PROCESSING_OK client_id=%s wa_id=%s message_id=%s temp=%s hot=%s text_len=%d reply_len=%d",
