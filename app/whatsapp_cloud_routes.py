@@ -33,6 +33,7 @@ WHATSAPP_CLOUD_PHONE_NUMBER_ID_ENV = "WHATSAPP_CLOUD_PHONE_NUMBER_ID"
 WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV = "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID"
 WHATSAPP_CLOUD_API_VERSION_ENV = "WHATSAPP_CLOUD_API_VERSION"
 WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV = "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES"
+WHATSAPP_CLOUD_CLIENT_MAP_ENV = "WHATSAPP_CLOUD_CLIENT_MAP"
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 router = APIRouter()
@@ -60,7 +61,7 @@ class WhatsAppCloudInboundTextMessage:
 @dataclass(frozen=True)
 class WhatsAppCloudConfig:
     access_token: str
-    default_client_id: str
+    client_id: str
     phone_number_id: str
     api_version: str
 
@@ -95,15 +96,42 @@ def resolve_whatsapp_cloud_send_to(wa_id: str) -> str:
     return wa_id
 
 
+def resolve_whatsapp_cloud_client_id(phone_number_id: str | None) -> str | None:
+    client_map = _get_env(WHATSAPP_CLOUD_CLIENT_MAP_ENV)
+    if phone_number_id and client_map:
+        for raw_pair in client_map.split(","):
+            pair = raw_pair.strip()
+            if ":" not in pair:
+                continue
+
+            source, target = pair.split(":", 1)
+            source = source.strip()
+            target = target.strip()
+            if not source or not target:
+                continue
+
+            if source == phone_number_id:
+                logger.info("WHATSAPP_CLOUD_CLIENT_RESOLVED source=phone_number_id_map")
+                return target
+
+    fallback_client_id = _get_env(WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV)
+    if fallback_client_id:
+        logger.info("WHATSAPP_CLOUD_CLIENT_RESOLVED source=default_client_id")
+        return fallback_client_id
+
+    logger.warning("WHATSAPP_CLOUD_CLIENT_RESOLVED source=none")
+    return None
+
+
 def _get_processing_config(payload_phone_number_id: str | None) -> WhatsAppCloudConfig | None:
     access_token = _get_env(WHATSAPP_CLOUD_ACCESS_TOKEN_ENV)
-    default_client_id = _get_env(WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV)
+    client_id = resolve_whatsapp_cloud_client_id(payload_phone_number_id)
     phone_number_id = payload_phone_number_id or _get_env(WHATSAPP_CLOUD_PHONE_NUMBER_ID_ENV)
     missing = []
     if not access_token:
         missing.append(WHATSAPP_CLOUD_ACCESS_TOKEN_ENV)
-    if not default_client_id:
-        missing.append(WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV)
+    if not client_id:
+        missing.append("whatsapp_cloud_client_id")
     if not phone_number_id:
         missing.append(WHATSAPP_CLOUD_PHONE_NUMBER_ID_ENV)
 
@@ -113,7 +141,7 @@ def _get_processing_config(payload_phone_number_id: str | None) -> WhatsAppCloud
 
     return WhatsAppCloudConfig(
         access_token=access_token,
-        default_client_id=default_client_id,
+        client_id=client_id,
         phone_number_id=phone_number_id,
         api_version=_get_cloud_api_version(),
     )
@@ -322,24 +350,24 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
         return
 
     async with async_session_factory() as db:
-        client = await client_service.get_by_id(db, config.default_client_id)
+        client = await client_service.get_by_id(db, config.client_id)
 
     if client is None:
         logger.warning(
             "WHATSAPP_CLOUD_PROCESSING_SKIP client_found=false client_id=%s",
-            config.default_client_id,
+            config.client_id,
         )
         return
 
     if client.status != "active":
         logger.warning(
             "WHATSAPP_CLOUD_PROCESSING_SKIP client_id=%s status=%s",
-            config.default_client_id,
+            config.client_id,
             client.status,
         )
         return
 
-    cache_key = f"whatsapp_cloud:{config.default_client_id}:{message.wa_id}"
+    cache_key = f"whatsapp_cloud:{config.client_id}:{message.wa_id}"
     user_ref = f"wa_cloud:{message.wa_id}"
 
     await _store.append(cache_key, "user", message.text_body)
@@ -348,13 +376,13 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
     if client.whatsapp_system_prompt:
         logger.info(
             "WHATSAPP_CLOUD_PROMPT using=whatsapp_system_prompt client_id=%s",
-            config.default_client_id,
+            config.client_id,
         )
         prompt_override = client.whatsapp_system_prompt
     else:
         logger.info(
             "WHATSAPP_CLOUD_PROMPT using=system_prompt client_id=%s",
-            config.default_client_id,
+            config.client_id,
         )
         prompt_override = None
 
@@ -411,7 +439,7 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
 
     logger.info(
         "WHATSAPP_CLOUD_PROCESSING_OK client_id=%s wa_id=%s message_id=%s temp=%s hot=%s text_len=%d reply_len=%d",
-        config.default_client_id,
+        config.client_id,
         message.wa_id,
         message.message_id,
         temperature,
