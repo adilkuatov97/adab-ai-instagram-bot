@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import time
+import inspect
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any
@@ -192,6 +193,28 @@ async def increment_outbox_item_attempts(item_id: str, last_error: str) -> None:
             item_id,
             exc.__class__.__name__,
         )
+
+
+async def close_outbox_redis_client() -> None:
+    global _redis_checked, _redis_client
+
+    redis = _redis_client
+    _redis_client = None
+    _redis_checked = False
+
+    if redis is None:
+        return
+
+    close_method = getattr(redis, "aclose", None) or getattr(redis, "close", None)
+    if close_method is None:
+        return
+
+    try:
+        result = close_method()
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_REDIS_CLOSE_ERROR error=%s", exc.__class__.__name__)
 
 
 async def _get_redis_client():

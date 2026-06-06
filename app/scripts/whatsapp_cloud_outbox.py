@@ -3,7 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from app.services.whatsapp_cloud_outbox import WhatsAppCloudOutboxItem, list_outbox_items
+from app.services.whatsapp_cloud_outbox import (
+    WhatsAppCloudOutboxItem,
+    close_outbox_redis_client,
+    list_outbox_items,
+)
 from app.services.whatsapp_cloud_outbox_retry import retry_outbox_item
 
 
@@ -19,16 +23,23 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.command == "list":
-        asyncio.run(_list_items(args.limit))
-        return
+    asyncio.run(_run_command(args))
 
-    if args.command == "retry":
-        ok = asyncio.run(retry_outbox_item(args.item_id))
-        if ok:
-            print(f"retry ok item_id={args.item_id}")
-        else:
-            print(f"retry failed item_id={args.item_id}")
+
+async def _run_command(args: argparse.Namespace) -> None:
+    try:
+        if args.command == "list":
+            await _list_items(args.limit)
+            return
+
+        if args.command == "retry":
+            ok = await retry_outbox_item(args.item_id)
+            if ok:
+                print(f"retry ok item_id={args.item_id}")
+            else:
+                print(f"retry failed item_id={args.item_id}")
+    finally:
+        await close_outbox_redis_client()
 
 
 async def _list_items(limit: int) -> None:

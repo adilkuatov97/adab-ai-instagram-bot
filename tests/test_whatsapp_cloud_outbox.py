@@ -7,6 +7,7 @@ from app.services import whatsapp_cloud_outbox
 from app.services.whatsapp_cloud_outbox import (
     FAILED_OUTBOX_ZSET_KEY,
     WhatsAppCloudOutboxItem,
+    close_outbox_redis_client,
     delete_outbox_item,
     deserialize_outbox_item,
     increment_outbox_item_attempts,
@@ -48,6 +49,29 @@ class _FakeRedis:
 
     async def zrem(self, key, member):
         self.zsets.get(key, {}).pop(member, None)
+
+
+class _AsyncCloseRedis(_FakeRedis):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    async def aclose(self):
+        self.closed = True
+
+
+class _SyncCloseRedis(_FakeRedis):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _FailingCloseRedis(_FakeRedis):
+    async def aclose(self):
+        raise RuntimeError("close failed")
 
 
 class WhatsAppCloudOutboxTest(unittest.TestCase):
@@ -110,6 +134,38 @@ class WhatsAppCloudOutboxTest(unittest.TestCase):
         self.assertIsNotNone(updated)
         self.assertEqual(updated.attempts, 2)
         self.assertEqual(updated.last_error, "new error with newline")
+
+    def test_close_outbox_redis_client_resets_cached_state(self):
+        redis = _AsyncCloseRedis()
+        whatsapp_cloud_outbox._redis_client = redis
+        whatsapp_cloud_outbox._redis_checked = True
+
+        asyncio.run(close_outbox_redis_client())
+
+        self.assertTrue(redis.closed)
+        self.assertIsNone(whatsapp_cloud_outbox._redis_client)
+        self.assertFalse(whatsapp_cloud_outbox._redis_checked)
+
+    def test_close_outbox_redis_client_supports_sync_close(self):
+        redis = _SyncCloseRedis()
+        whatsapp_cloud_outbox._redis_client = redis
+        whatsapp_cloud_outbox._redis_checked = True
+
+        asyncio.run(close_outbox_redis_client())
+
+        self.assertTrue(redis.closed)
+        self.assertIsNone(whatsapp_cloud_outbox._redis_client)
+        self.assertFalse(whatsapp_cloud_outbox._redis_checked)
+
+    def test_close_outbox_redis_client_failure_does_not_crash(self):
+        redis = _FailingCloseRedis()
+        whatsapp_cloud_outbox._redis_client = redis
+        whatsapp_cloud_outbox._redis_checked = True
+
+        asyncio.run(close_outbox_redis_client())
+
+        self.assertIsNone(whatsapp_cloud_outbox._redis_client)
+        self.assertFalse(whatsapp_cloud_outbox._redis_checked)
 
 
 def _item(item_id: str, created_at: str = "2026-06-05T10:00:00+00:00"):
