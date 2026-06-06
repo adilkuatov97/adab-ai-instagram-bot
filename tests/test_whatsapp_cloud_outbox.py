@@ -11,6 +11,7 @@ from app.services.whatsapp_cloud_outbox import (
     delete_outbox_item,
     deserialize_outbox_item,
     increment_outbox_item_attempts,
+    count_outbox_items,
     list_outbox_items,
     load_outbox_item,
     save_failed_outbox_item,
@@ -49,6 +50,9 @@ class _FakeRedis:
 
     async def zrem(self, key, member):
         self.zsets.get(key, {}).pop(member, None)
+
+    async def zcard(self, key):
+        return len(self.zsets.get(key, {}))
 
 
 class _AsyncCloseRedis(_FakeRedis):
@@ -134,6 +138,12 @@ class WhatsAppCloudOutboxTest(unittest.TestCase):
         self.assertIsNotNone(updated)
         self.assertEqual(updated.attempts, 2)
         self.assertEqual(updated.last_error, "new error with newline")
+
+    def test_count_outbox_items_with_fake_redis(self):
+        asyncio.run(save_failed_outbox_item(_item("item-1")))
+        asyncio.run(save_failed_outbox_item(_item("item-2")))
+
+        self.assertEqual(asyncio.run(count_outbox_items()), 2)
 
     def test_close_outbox_redis_client_resets_cached_state(self):
         redis = _AsyncCloseRedis()

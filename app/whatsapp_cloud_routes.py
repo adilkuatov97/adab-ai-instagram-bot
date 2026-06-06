@@ -23,6 +23,7 @@ from app.services.conversation_store import ConversationStore
 from app.services.telegram_service import send_lead_notification
 from app.services.whatsapp_cloud_outbox import (
     WhatsAppCloudOutboxItem,
+    count_outbox_items,
     save_failed_outbox_item,
 )
 from app.services.whatsapp_cloud_service import (
@@ -152,6 +153,10 @@ def _get_processing_config(payload_phone_number_id: str | None) -> WhatsAppCloud
         phone_number_id=phone_number_id,
         api_version=_get_cloud_api_version(),
     )
+
+
+def _is_whatsapp_cloud_client_configured() -> bool:
+    return bool(_get_env(WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV) or _get_env(WHATSAPP_CLOUD_CLIENT_MAP_ENV))
 
 
 def _is_valid_signature(raw_body: bytes, signature: str, app_secret: str) -> bool:
@@ -510,6 +515,30 @@ async def verify_whatsapp_cloud_webhook(request: Request):
         return PlainTextResponse(challenge)
 
     raise HTTPException(status_code=403)
+
+
+@router.get("/health")
+async def whatsapp_cloud_health():
+    access_token_configured = bool(_get_env(WHATSAPP_CLOUD_ACCESS_TOKEN_ENV))
+    phone_number_id_configured = bool(_get_env(WHATSAPP_CLOUD_PHONE_NUMBER_ID_ENV))
+    client_map_configured = bool(_get_env(WHATSAPP_CLOUD_CLIENT_MAP_ENV))
+    recipient_overrides_configured = bool(_get_env(WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV))
+    client_id_configured = _is_whatsapp_cloud_client_configured()
+    configured = access_token_configured and phone_number_id_configured and client_id_configured
+    outbox_failed_count = await count_outbox_items()
+
+    return {
+        "ok": configured,
+        "configured": configured,
+        "access_token_configured": access_token_configured,
+        "phone_number_id_configured": phone_number_id_configured,
+        "client_id_configured": client_id_configured,
+        "client_map_configured": client_map_configured,
+        "recipient_overrides_configured": recipient_overrides_configured,
+        "redis_available": outbox_failed_count is not None,
+        "outbox_failed_count": outbox_failed_count,
+        "api_version": _get_cloud_api_version(),
+    }
 
 
 @router.post("/webhook")
