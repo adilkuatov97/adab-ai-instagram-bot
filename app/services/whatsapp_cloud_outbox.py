@@ -137,6 +137,19 @@ async def list_outbox_items(limit: int = 20) -> list[WhatsAppCloudOutboxItem]:
     return items
 
 
+async def count_outbox_items() -> int | None:
+    redis = await _get_redis_client()
+    if redis is None:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_COUNT_SKIP redis_available=false")
+        return None
+
+    try:
+        return int(await redis.zcard(FAILED_OUTBOX_ZSET_KEY))
+    except Exception as exc:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_COUNT_ERROR error=%s", exc.__class__.__name__)
+        return None
+
+
 async def delete_outbox_item(item_id: str) -> None:
     redis = await _get_redis_client()
     if redis is None:

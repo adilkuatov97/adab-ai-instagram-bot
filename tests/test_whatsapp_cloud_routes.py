@@ -19,6 +19,7 @@ from app.whatsapp_cloud_routes import (
     _send_whatsapp_cloud_reply_with_outbox,
     resolve_whatsapp_cloud_client_id,
     resolve_whatsapp_cloud_send_to,
+    whatsapp_cloud_health,
 )
 from app.services.whatsapp_cloud_service import WhatsAppCloudSendError
 
@@ -322,6 +323,92 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
         self.assertIsNotNone(config)
         self.assertEqual(config.client_id, "mapped-client")
         self.assertEqual(config.phone_number_id, "1175403148986567")
+
+    def test_health_endpoint_configured_true_with_envs(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_ACCESS_TOKEN": "secret-token",
+                "WHATSAPP_CLOUD_PHONE_NUMBER_ID": "1175403148986567",
+                "WHATSAPP_CLOUD_CLIENT_MAP": "1175403148986567:client-id",
+                "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES": "77780400008:787780400008",
+                "WHATSAPP_CLOUD_API_VERSION": "v25.0",
+            },
+            clear=True,
+        ):
+            with patch(
+                "app.whatsapp_cloud_routes.count_outbox_items",
+                new=AsyncMock(return_value=3),
+            ):
+                response = asyncio.run(whatsapp_cloud_health())
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["configured"])
+        self.assertTrue(response["access_token_configured"])
+        self.assertTrue(response["phone_number_id_configured"])
+        self.assertTrue(response["client_id_configured"])
+        self.assertTrue(response["client_map_configured"])
+        self.assertTrue(response["recipient_overrides_configured"])
+        self.assertTrue(response["redis_available"])
+        self.assertEqual(response["outbox_failed_count"], 3)
+        self.assertEqual(response["api_version"], "v25.0")
+
+    def test_health_endpoint_configured_false_when_required_envs_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "app.whatsapp_cloud_routes.count_outbox_items",
+                new=AsyncMock(return_value=None),
+            ):
+                response = asyncio.run(whatsapp_cloud_health())
+
+        self.assertFalse(response["ok"])
+        self.assertFalse(response["configured"])
+        self.assertFalse(response["access_token_configured"])
+        self.assertFalse(response["phone_number_id_configured"])
+        self.assertFalse(response["client_id_configured"])
+        self.assertFalse(response["client_map_configured"])
+        self.assertFalse(response["recipient_overrides_configured"])
+        self.assertFalse(response["redis_available"])
+        self.assertIsNone(response["outbox_failed_count"])
+        self.assertEqual(response["api_version"], "v25.0")
+
+    def test_health_endpoint_response_does_not_include_secrets(self):
+        secret_values = {
+            "WHATSAPP_CLOUD_ACCESS_TOKEN": "secret-token",
+            "WHATSAPP_CLOUD_PHONE_NUMBER_ID": "1175403148986567",
+            "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID": "client-secret-id",
+            "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES": "77780400008:787780400008",
+        }
+        with patch.dict(os.environ, secret_values, clear=True):
+            with patch(
+                "app.whatsapp_cloud_routes.count_outbox_items",
+                new=AsyncMock(return_value=0),
+            ):
+                response = asyncio.run(whatsapp_cloud_health())
+
+        response_text = str(response)
+        for value in secret_values.values():
+            self.assertNotIn(value, response_text)
+
+    def test_health_endpoint_redis_unavailable_returns_null_count(self):
+        with patch.dict(
+            os.environ,
+            {
+                "WHATSAPP_CLOUD_ACCESS_TOKEN": "secret-token",
+                "WHATSAPP_CLOUD_PHONE_NUMBER_ID": "1175403148986567",
+                "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID": "client-id",
+            },
+            clear=True,
+        ):
+            with patch(
+                "app.whatsapp_cloud_routes.count_outbox_items",
+                new=AsyncMock(return_value=None),
+            ):
+                response = asyncio.run(whatsapp_cloud_health())
+
+        self.assertTrue(response["ok"])
+        self.assertFalse(response["redis_available"])
+        self.assertIsNone(response["outbox_failed_count"])
 
     def test_failed_send_creates_outbox_item(self):
         message = WhatsAppCloudInboundTextMessage(
