@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock, patch
 
-from app.scripts.whatsapp_cloud_outbox import format_outbox_item, mask_phone
+from app.scripts.whatsapp_cloud_outbox import format_outbox_item, mask_phone, _run_command
 from app.services.whatsapp_cloud_outbox import WhatsAppCloudOutboxItem
 
 
@@ -32,6 +33,24 @@ class WhatsAppCloudOutboxCliTest(unittest.TestCase):
         self.assertNotIn("77780400008", line)
         self.assertNotIn("787780400008", line)
         self.assertNotIn("secret reply text", line)
+
+    def test_list_path_calls_close_helper(self):
+        args = type("Args", (), {"command": "list", "limit": 20})()
+
+        with patch(
+            "app.scripts.whatsapp_cloud_outbox.list_outbox_items",
+            new=AsyncMock(return_value=[]),
+        ):
+            with patch(
+                "app.scripts.whatsapp_cloud_outbox.close_outbox_redis_client",
+                new=AsyncMock(),
+            ) as close_mock:
+                with patch("builtins.print"):
+                    import asyncio
+
+                    asyncio.run(_run_command(args))
+
+        close_mock.assert_awaited_once()
 
 
 if __name__ == "__main__":
