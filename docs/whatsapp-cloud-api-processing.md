@@ -27,6 +27,21 @@ WHATSAPP_CLOUD_API_VERSION=v25.0
 
 `WHATSAPP_CLOUD_API_VERSION` defaults to `v25.0` when missing.
 
+Debounce and per-user processing lock:
+
+```text
+WHATSAPP_CLOUD_DEBOUNCE_SECONDS=3
+WHATSAPP_CLOUD_LOCK_TTL_SECONDS=120
+```
+
+Inbound text messages from the same `client_id + wa_id` are buffered under:
+
+```text
+whatsapp_cloud:{client_id}:{wa_id}:pending
+```
+
+The worker waits 2-4 seconds, combines all pending texts for that user, sends one combined text to Claude, and sends one WhatsApp reply. A per-user lock prevents two concurrent workers for the same `client_id + wa_id`; the lock has a TTL so a crashed worker cannot block the user forever.
+
 The app still starts if these variables are missing. Missing processing variables only stop WhatsApp Cloud message processing/reply sending and are logged without exposing tokens.
 
 ## Webhook URL
