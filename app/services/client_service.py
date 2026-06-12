@@ -167,25 +167,38 @@ async def save_lead(
     client_id: uuid.UUID,
     conversation: Conversation,
     instagram_user_id: str,
-    temperature: str,
+    temperature: str | int,
     last_message: str,
 ) -> Lead:
+    temperature_label = _temperature_label(temperature)
     lead = Lead(
         client_id=client_id,
         conversation_id=conversation.id,
         instagram_user_id=instagram_user_id,
-        temperature=temperature,
+        temperature=temperature_label,
         last_message=last_message,
     )
     db.add(lead)
 
     temp_order = {"hot": 2, "warm": 1, "cold": 0}
-    if temp_order.get(temperature, 0) > temp_order.get(conversation.highest_temperature, 0):
-        conversation.highest_temperature = temperature
+    if temp_order.get(temperature_label, 0) > temp_order.get(conversation.highest_temperature, 0):
+        conversation.highest_temperature = temperature_label
 
     await db.commit()
     await db.refresh(lead)
     return lead
+
+
+def _temperature_label(temperature: str | int) -> str:
+    if isinstance(temperature, int) and not isinstance(temperature, bool):
+        return {2: "hot", 1: "warm", 0: "cold"}.get(max(0, min(temperature, 2)), "cold")
+    if isinstance(temperature, str):
+        normalized = temperature.strip().lower()
+        if normalized in {"hot", "warm", "cold"}:
+            return normalized
+        if normalized.isdigit():
+            return _temperature_label(int(normalized))
+    return "cold"
 
 
 async def mark_lead_notified(db: AsyncSession, lead: Lead) -> None:

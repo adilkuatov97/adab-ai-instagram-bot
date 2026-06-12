@@ -13,7 +13,7 @@ def _html_escape(text: str) -> str:
 async def send_lead_notification(
     sender_id: str,
     ai_reply: str,
-    temperature: str,
+    temperature: str | int,
     telegram_chat_id: str,
     whatsapp_link: str,
     recent_messages: list[dict],
@@ -22,7 +22,7 @@ async def send_lead_notification(
         print("TELEGRAM: bot token or chat_id not set, skipping")
         return
 
-    temp_label = "🔥 ГОРЯЧИЙ ЛИД" if temperature == "hot" else "🌡️ ТЁПЛЫЙ ЛИД"
+    temp_label = "🔥 ГОРЯЧИЙ ЛИД" if _is_hot_temperature(temperature) else "🌡️ ТЁПЛЫЙ ЛИД"
 
     almaty_tz = pytz.timezone("Asia/Almaty")
     now = datetime.now(almaty_tz).strftime("%d.%m.%Y %H:%M")
@@ -72,3 +72,12 @@ async def send_lead_notification(
                 print(f"TELEGRAM ERROR {r.status_code}: {resp_data.get('description', r.text)}")
     except Exception as e:
         print(f"TELEGRAM EXCEPTION: {type(e).__name__}: {e}")
+
+
+def _is_hot_temperature(temperature: str | int) -> bool:
+    if isinstance(temperature, int) and not isinstance(temperature, bool):
+        return temperature >= 2
+    if isinstance(temperature, str):
+        normalized = temperature.strip().lower()
+        return normalized == "hot" or normalized == "2"
+    return False
