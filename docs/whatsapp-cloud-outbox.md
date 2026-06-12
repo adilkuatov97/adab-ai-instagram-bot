@@ -24,6 +24,12 @@ whatsapp_cloud:outbox:failed:item:{id}
 
 The initial sorted set score is the outbox item creation timestamp in milliseconds. Failed manual retries update the score to the current timestamp so recently retried failures appear first.
 
+Failed item payload keys are stored with a TTL:
+
+- default: 7 days
+- env override: `WHATSAPP_CLOUD_OUTBOX_TTL_SECONDS`
+- accepted range: 60 seconds to 30 days
+
 ## Stored fields
 
 Each item stores:
@@ -73,6 +79,11 @@ On retry failure:
 - `attempts` is incremented
 - `last_error` is updated with a safe string capped at 500 characters
 - the sorted set score is updated to the current timestamp so recently retried failures appear first
+
+Manual retries stop when `attempts >= WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS`.
+
+- default: 5 attempts
+- accepted range: 1 to 20 attempts
 
 ## Limitations
 

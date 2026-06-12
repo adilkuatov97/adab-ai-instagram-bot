@@ -41,6 +41,9 @@ WHATSAPP_CLOUD_CLIENT_MAP=
 WHATSAPP_CLOUD_DEFAULT_CLIENT_ID=
 WHATSAPP_CLOUD_API_VERSION=v25.0
 WHATSAPP_CLOUD_APP_SECRET=
+WHATSAPP_CLOUD_OUTBOX_TTL_SECONDS=604800
+WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS=5
+APP_ENV=production
 REDIS_URL=
 DATABASE_URL=
 ANTHROPIC_API_KEY=
@@ -51,9 +54,11 @@ Notes:
 - `WHATSAPP_CLOUD_CLIENT_MAP` should map the production `phone_number_id` to the internal `client_id`.
 - Keep `WHATSAPP_CLOUD_DEFAULT_CLIENT_ID` as a fallback during rollout.
 - `WHATSAPP_CLOUD_API_VERSION` should remain explicit, currently `v25.0`.
-- `WHATSAPP_CLOUD_APP_SECRET` should stay configured so webhook signature verification remains enabled.
+- `WHATSAPP_CLOUD_APP_SECRET` is required in production. Without it, POST `/whatsapp/cloud/webhook` fails closed.
 - Use the existing Claude env if the deployment uses a different configured Claude/Anthropic variable.
-- `WHATSAPP_CLOUD_RECIPIENT_OVERRIDES` is test-mode only. It should be empty or removed in production.
+- `WHATSAPP_CLOUD_RECIPIENT_OVERRIDES` is test-mode only. It should be empty or removed in production; production sends ignore it.
+- `WHATSAPP_CLOUD_OUTBOX_TTL_SECONDS` controls failed-send PII retention in Redis. Default is 7 days, capped at 30 days.
+- `WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS` controls manual retry attempts before the CLI refuses another retry. Default is 5.
 
 Example mapping:
 
@@ -72,7 +77,7 @@ WHATSAPP_CLOUD_CLIENT_MAP=1175403148986567:f17a14f4-124a-439a-b3ae-0911ea007037
 7. Keep the test number env values documented separately outside the repo.
 8. Ensure `WHATSAPP_CLOUD_RECIPIENT_OVERRIDES` is empty or removed.
 9. Deploy the latest commit.
-10. Open the health endpoint and confirm `ok=true`, `configured=true`, and `outbox_failed_count=0`.
+10. Open the health endpoint and confirm `ok=true`, `configured=true`, `production_ready=true`, `app_secret_configured=true`, `recipient_overrides_configured=false`, and `outbox_failed_count=0`.
 11. Send an inbound test message from a real customer WhatsApp number.
 12. Confirm the backend receives the inbound message.
 13. Confirm Claude generates a reply.
@@ -144,7 +149,10 @@ Expected healthy status:
 {
   "ok": true,
   "configured": true,
+  "production": true,
+  "production_ready": true,
   "access_token_configured": true,
+  "app_secret_configured": true,
   "phone_number_id_configured": true,
   "client_id_configured": true,
   "client_map_configured": true,
@@ -160,7 +168,7 @@ Expected healthy status:
 - Never commit tokens.
 - Do not screenshot tokens.
 - Rotate the permanent system user token if it is exposed.
-- Keep `WHATSAPP_CLOUD_APP_SECRET` configured for webhook signature verification.
+- Keep `WHATSAPP_CLOUD_APP_SECRET` configured for webhook signature verification. Production webhook POSTs fail closed without it.
 - Do not expose `reply_text` from outbox records publicly.
 - Keep Render env access limited to trusted operators.
 

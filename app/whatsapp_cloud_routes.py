@@ -42,6 +42,7 @@ WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV = "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID"
 WHATSAPP_CLOUD_API_VERSION_ENV = "WHATSAPP_CLOUD_API_VERSION"
 WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV = "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES"
 WHATSAPP_CLOUD_CLIENT_MAP_ENV = "WHATSAPP_CLOUD_CLIENT_MAP"
+PRODUCTION_ENV_NAMES = {"production", "prod", "live"}
 REDIS_URL = os.getenv("REDIS_URL", "")
 
 router = APIRouter()
@@ -82,9 +83,23 @@ def _get_cloud_api_version() -> str:
     return _get_env(WHATSAPP_CLOUD_API_VERSION_ENV) or DEFAULT_WHATSAPP_CLOUD_API_VERSION
 
 
+def _is_production_environment() -> bool:
+    raw = (
+        os.getenv("APP_ENV")
+        or os.getenv("ENVIRONMENT")
+        or os.getenv("APP_ENVIRONMENT")
+        or os.getenv("NODE_ENV")
+        or ""
+    )
+    return raw.strip().lower() in PRODUCTION_ENV_NAMES
+
+
 def resolve_whatsapp_cloud_send_to(wa_id: str) -> str:
     overrides = _get_env(WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV)
     if not overrides:
+        return wa_id
+    if _is_production_environment():
+        logger.error("WHATSAPP_CLOUD_RECIPIENT_OVERRIDE_IGNORED production=true")
         return wa_id
 
     for raw_pair in overrides.split(","):
@@ -304,7 +319,13 @@ def _safe_object_name(payload: dict[str, Any]) -> str | None:
 async def _verify_signature_if_configured(request: Request, raw_body: bytes) -> None:
     app_secret = _get_env(WHATSAPP_CLOUD_APP_SECRET_ENV)
     if not app_secret:
-        logger.warning("WHATSAPP_CLOUD_SIG_SKIP app_secret_configured=false")
+        if _is_production_environment():
+            logger.error("WHATSAPP_CLOUD_SIG_REJECT app_secret_configured=false production=true")
+            raise HTTPException(
+                status_code=503,
+                detail="WhatsApp Cloud signature verification is not configured",
+            )
+        logger.warning("WHATSAPP_CLOUD_SIG_SKIP app_secret_configured=false production=false")
         return
 
     signature = request.headers.get("x-hub-signature-256", "")
@@ -524,17 +545,25 @@ async def whatsapp_cloud_health():
     client_map_configured = bool(_get_env(WHATSAPP_CLOUD_CLIENT_MAP_ENV))
     recipient_overrides_configured = bool(_get_env(WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV))
     client_id_configured = _is_whatsapp_cloud_client_configured()
+    app_secret_configured = bool(_get_env(WHATSAPP_CLOUD_APP_SECRET_ENV))
+    production = _is_production_environment()
     configured = access_token_configured and phone_number_id_configured and client_id_configured
+    production_ready = configured and (
+        not production or (app_secret_configured and not recipient_overrides_configured)
+    )
     outbox_failed_count = await count_outbox_items()
 
     return {
-        "ok": configured,
+        "ok": production_ready,
         "configured": configured,
+        "production": production,
+        "production_ready": production_ready,
         "access_token_configured": access_token_configured,
         "phone_number_id_configured": phone_number_id_configured,
         "client_id_configured": client_id_configured,
         "client_map_configured": client_map_configured,
         "recipient_overrides_configured": recipient_overrides_configured,
+        "app_secret_configured": app_secret_configured,
         "redis_available": outbox_failed_count is not None,
         "outbox_failed_count": outbox_failed_count,
         "api_version": _get_cloud_api_version(),

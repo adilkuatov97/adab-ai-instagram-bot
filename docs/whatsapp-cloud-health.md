@@ -10,9 +10,12 @@ The endpoint always returns HTTP 200. Use the response fields to understand stat
 
 ## Fields
 
-- `ok`: true when WhatsApp Cloud send configuration is ready.
-- `configured`: same readiness value as `ok`.
+- `ok`: true when WhatsApp Cloud send configuration is ready and production-only safety checks pass.
+- `configured`: true when required WhatsApp Cloud send configuration is present.
+- `production`: true when `APP_ENV`, `ENVIRONMENT`, `APP_ENVIRONMENT`, or `NODE_ENV` is `production`, `prod`, or `live`.
+- `production_ready`: true when `configured` is true and production-only safety checks pass.
 - `access_token_configured`: true when `WHATSAPP_CLOUD_ACCESS_TOKEN` is set.
+- `app_secret_configured`: true when `WHATSAPP_CLOUD_APP_SECRET` is set.
 - `phone_number_id_configured`: true when `WHATSAPP_CLOUD_PHONE_NUMBER_ID` is set.
 - `client_id_configured`: true when `WHATSAPP_CLOUD_DEFAULT_CLIENT_ID` or `WHATSAPP_CLOUD_CLIENT_MAP` is set.
 - `client_map_configured`: true when `WHATSAPP_CLOUD_CLIENT_MAP` is set.
@@ -27,7 +30,10 @@ The endpoint always returns HTTP 200. Use the response fields to understand stat
 {
   "ok": true,
   "configured": true,
+  "production": true,
+  "production_ready": true,
   "access_token_configured": true,
+  "app_secret_configured": true,
   "phone_number_id_configured": true,
   "client_id_configured": true,
   "client_map_configured": true,
@@ -44,7 +50,10 @@ The endpoint always returns HTTP 200. Use the response fields to understand stat
 {
   "ok": true,
   "configured": true,
+  "production": false,
+  "production_ready": true,
   "access_token_configured": true,
+  "app_secret_configured": false,
   "phone_number_id_configured": true,
   "client_id_configured": true,
   "client_map_configured": false,
@@ -58,3 +67,8 @@ The endpoint always returns HTTP 200. Use the response fields to understand stat
 ## Security
 
 The endpoint does not return access tokens, client ids, phone numbers, recipient override values, Redis URL, outbox contents, or `reply_text`.
+
+In production, `ok` becomes `false` when either:
+
+- `WHATSAPP_CLOUD_APP_SECRET` is missing, because webhook signature validation must fail closed.
+- `WHATSAPP_CLOUD_RECIPIENT_OVERRIDES` is configured, because recipient overrides are test-mode only.
