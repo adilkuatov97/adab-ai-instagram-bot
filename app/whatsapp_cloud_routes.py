@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,11 +43,34 @@ WHATSAPP_CLOUD_DEFAULT_CLIENT_ID_ENV = "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID"
 WHATSAPP_CLOUD_API_VERSION_ENV = "WHATSAPP_CLOUD_API_VERSION"
 WHATSAPP_CLOUD_RECIPIENT_OVERRIDES_ENV = "WHATSAPP_CLOUD_RECIPIENT_OVERRIDES"
 WHATSAPP_CLOUD_CLIENT_MAP_ENV = "WHATSAPP_CLOUD_CLIENT_MAP"
+WHATSAPP_CLOUD_DEBOUNCE_SECONDS_ENV = "WHATSAPP_CLOUD_DEBOUNCE_SECONDS"
+WHATSAPP_CLOUD_LOCK_TTL_SECONDS_ENV = "WHATSAPP_CLOUD_LOCK_TTL_SECONDS"
 PRODUCTION_ENV_NAMES = {"production", "prod", "live"}
 REDIS_URL = os.getenv("REDIS_URL", "")
+PENDING_BUFFER_TTL_SECONDS = 30
+DEFAULT_WHATSAPP_CLOUD_DEBOUNCE_SECONDS = 3.0
+DEFAULT_WHATSAPP_CLOUD_LOCK_TTL_SECONDS = 120
+WHATSAPP_CLOUD_RESPONSE_POLICY = """
+
+═══════════════════════════════════════
+WHATSAPP RESPONSE POLICY
+
+Пиши как живой менеджер в WhatsApp: спокойно, уверенно, конкретно.
+Максимум 500–700 символов.
+Одна мысль = один короткий ответ.
+Не повторяй CTA в каждом сообщении.
+Не дави на Zoom/созвон сразу.
+Если клиент возражает — сначала ответь на конкретное возражение.
+Не звучать как агрессивный продажник.
+Не перечисляй всё подряд, не пиши воду.
+Если несколько сообщений клиента объединены, отвечай одним цельным сообщением.
+"""
 
 router = APIRouter()
 _store = ConversationStore(REDIS_URL)
+_pending_memory: dict[str, list[dict[str, Any]]] = {}
+_pending_memory_locks: dict[str, float] = {}
+_pending_memory_guard = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -68,6 +92,16 @@ class WhatsAppCloudInboundTextMessage:
 
 
 @dataclass(frozen=True)
+class WhatsAppCloudPendingTextMessage:
+    wa_id: str
+    message_id: str
+    timestamp: str | None
+    text_body: str
+    phone_number_id: str | None
+    queued_at: float
+
+
+@dataclass(frozen=True)
 class WhatsAppCloudConfig:
     access_token: str
     client_id: str
@@ -81,6 +115,38 @@ def _get_env(name: str) -> str:
 
 def _get_cloud_api_version() -> str:
     return _get_env(WHATSAPP_CLOUD_API_VERSION_ENV) or DEFAULT_WHATSAPP_CLOUD_API_VERSION
+
+
+def _get_debounce_delay_seconds() -> float:
+    return _get_float_env(
+        WHATSAPP_CLOUD_DEBOUNCE_SECONDS_ENV,
+        DEFAULT_WHATSAPP_CLOUD_DEBOUNCE_SECONDS,
+        min_value=2.0,
+        max_value=4.0,
+    )
+
+
+def _get_lock_ttl_seconds() -> int:
+    return int(
+        _get_float_env(
+            WHATSAPP_CLOUD_LOCK_TTL_SECONDS_ENV,
+            float(DEFAULT_WHATSAPP_CLOUD_LOCK_TTL_SECONDS),
+            min_value=10.0,
+            max_value=300.0,
+        )
+    )
+
+
+def _get_float_env(name: str, default: float, *, min_value: float, max_value: float) -> float:
+    raw = _get_env(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("WHATSAPP_CLOUD_ENV_FLOAT_INVALID name=%s", name)
+        return default
+    return max(min_value, min(value, max_value))
 
 
 def _is_production_environment() -> bool:
@@ -338,11 +404,209 @@ async def _mark_message_for_processing(message_id: str) -> bool:
     mark_result = await _store.mark_once_redis(redis_key)
     if mark_result is None:
         logger.warning("WHATSAPP_CLOUD_IDEMPOTENCY_UNAVAILABLE message_id=%s", message_id)
+        seen = await _store.is_seen(redis_key)
+        if seen:
+            logger.info("WHATSAPP_CLOUD_DUPLICATE_SKIPPED fallback=memory message_id=%s", message_id)
+            return False
         return True
     if not mark_result:
         logger.info("WHATSAPP_CLOUD_DUPLICATE_SKIPPED message_id=%s", message_id)
         return False
     return True
+
+
+def _pending_key(client_id: str, wa_id: str) -> str:
+    return f"whatsapp_cloud:{client_id}:{wa_id}:pending"
+
+
+def _pending_lock_key(client_id: str, wa_id: str) -> str:
+    return f"whatsapp_cloud:{client_id}:{wa_id}:lock"
+
+
+def _get_store_redis():
+    return getattr(_store, "_redis", None)
+
+
+async def _append_pending_text_message(
+    config: WhatsAppCloudConfig,
+    message: WhatsAppCloudInboundTextMessage,
+) -> None:
+    pending = WhatsAppCloudPendingTextMessage(
+        wa_id=message.wa_id,
+        message_id=message.message_id,
+        timestamp=message.timestamp,
+        text_body=message.text_body,
+        phone_number_id=message.phone_number_id,
+        queued_at=time.time(),
+    )
+    key = _pending_key(config.client_id, message.wa_id)
+    redis = _get_store_redis()
+
+    if redis is not None:
+        try:
+            await redis.rpush(key, json.dumps(_pending_message_to_dict(pending)))
+            await redis.expire(key, PENDING_BUFFER_TTL_SECONDS)
+            count = int(await redis.llen(key))
+            logger.info(
+                "WHATSAPP_CLOUD_PENDING_BUFFERED storage=redis client_id=%s wa_id=%s count=%d",
+                config.client_id,
+                message.wa_id,
+                count,
+            )
+            return
+        except Exception as exc:
+            logger.warning(
+                "WHATSAPP_CLOUD_PENDING_BUFFER_REDIS_ERROR error=%s",
+                exc.__class__.__name__,
+            )
+
+    async with _pending_memory_guard:
+        messages = _pending_memory.setdefault(key, [])
+        messages.append(_pending_message_to_dict(pending))
+        logger.info(
+            "WHATSAPP_CLOUD_PENDING_BUFFERED storage=memory client_id=%s wa_id=%s count=%d",
+            config.client_id,
+            message.wa_id,
+            len(messages),
+        )
+
+
+async def _pop_pending_text_messages(
+    client_id: str,
+    wa_id: str,
+) -> list[WhatsAppCloudPendingTextMessage]:
+    key = _pending_key(client_id, wa_id)
+    redis = _get_store_redis()
+
+    if redis is not None:
+        try:
+            raw_messages = await redis.lrange(key, 0, -1)
+            await redis.delete(key)
+            return [
+                message
+                for raw_message in _deserialize_pending_message_items(raw_messages)
+                if (message := _pending_message_from_dict(raw_message)) is not None
+            ]
+        except Exception as exc:
+            logger.warning(
+                "WHATSAPP_CLOUD_PENDING_POP_REDIS_ERROR error=%s",
+                exc.__class__.__name__,
+            )
+
+    async with _pending_memory_guard:
+        raw_messages = _pending_memory.pop(key, [])
+
+    return [
+        message
+        for raw_message in raw_messages
+        if (message := _pending_message_from_dict(raw_message)) is not None
+    ]
+
+
+async def _has_pending_text_messages(client_id: str, wa_id: str) -> bool:
+    key = _pending_key(client_id, wa_id)
+    redis = _get_store_redis()
+
+    if redis is not None:
+        try:
+            return int(await redis.llen(key)) > 0
+        except Exception as exc:
+            logger.warning(
+                "WHATSAPP_CLOUD_PENDING_EXISTS_REDIS_ERROR error=%s",
+                exc.__class__.__name__,
+            )
+
+    async with _pending_memory_guard:
+        return bool(_pending_memory.get(key))
+
+
+async def _acquire_pending_lock(client_id: str, wa_id: str) -> bool:
+    lock_key = _pending_lock_key(client_id, wa_id)
+    lock_ttl_seconds = _get_lock_ttl_seconds()
+    redis = _get_store_redis()
+
+    if redis is not None:
+        try:
+            return bool(await redis.set(lock_key, "1", ex=lock_ttl_seconds, nx=True))
+        except Exception as exc:
+            logger.warning(
+                "WHATSAPP_CLOUD_PENDING_LOCK_REDIS_ERROR error=%s",
+                exc.__class__.__name__,
+            )
+
+    now = time.time()
+    async with _pending_memory_guard:
+        locked_until = _pending_memory_locks.get(lock_key, 0)
+        if locked_until > now:
+            return False
+        _pending_memory_locks[lock_key] = now + lock_ttl_seconds
+        return True
+
+
+async def _release_pending_lock(client_id: str, wa_id: str) -> None:
+    lock_key = _pending_lock_key(client_id, wa_id)
+    redis = _get_store_redis()
+
+    if redis is not None:
+        try:
+            await redis.delete(lock_key)
+            return
+        except Exception as exc:
+            logger.warning(
+                "WHATSAPP_CLOUD_PENDING_UNLOCK_REDIS_ERROR error=%s",
+                exc.__class__.__name__,
+            )
+
+    async with _pending_memory_guard:
+        _pending_memory_locks.pop(lock_key, None)
+
+
+def _deserialize_pending_message_items(raw_items: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_items, list):
+        return []
+
+    messages: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        try:
+            parsed = json.loads(raw_item)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            messages.append(parsed)
+    return messages
+
+
+def _pending_message_to_dict(message: WhatsAppCloudPendingTextMessage) -> dict[str, Any]:
+    return {
+        "wa_id": message.wa_id,
+        "message_id": message.message_id,
+        "timestamp": message.timestamp,
+        "text_body": message.text_body,
+        "phone_number_id": message.phone_number_id,
+        "queued_at": message.queued_at,
+    }
+
+
+def _pending_message_from_dict(data: dict[str, Any]) -> WhatsAppCloudPendingTextMessage | None:
+    wa_id = data.get("wa_id")
+    message_id = data.get("message_id")
+    text_body = data.get("text_body")
+    if not isinstance(wa_id, str) or not isinstance(message_id, str):
+        return None
+    if not isinstance(text_body, str) or not text_body.strip():
+        return None
+
+    timestamp = data.get("timestamp")
+    phone_number_id = data.get("phone_number_id")
+    queued_at = data.get("queued_at")
+    return WhatsAppCloudPendingTextMessage(
+        wa_id=wa_id,
+        message_id=message_id,
+        timestamp=timestamp if isinstance(timestamp, str) else None,
+        text_body=text_body,
+        phone_number_id=phone_number_id if isinstance(phone_number_id, str) else None,
+        queued_at=queued_at if isinstance(queued_at, (int, float)) else time.time(),
+    )
 
 
 async def _send_whatsapp_cloud_reply(
@@ -399,6 +663,27 @@ def _safe_outbox_error(exc: Exception) -> str:
     return safe_error[:500]
 
 
+def _build_whatsapp_prompt_override(client) -> str:
+    base_prompt = client.whatsapp_system_prompt or client.system_prompt or ""
+    return f"{base_prompt}{WHATSAPP_CLOUD_RESPONSE_POLICY}"
+
+
+def _combine_pending_text_messages(messages: list[WhatsAppCloudPendingTextMessage]) -> str:
+    return "\n".join(message.text_body.strip() for message in messages if message.text_body.strip())
+
+
+def _normalize_whatsapp_reply(reply: str) -> str:
+    normalized = " ".join(reply.split()).strip()
+    if len(normalized) <= 700:
+        return normalized
+
+    clipped = normalized[:700].rstrip()
+    sentence_end = max(clipped.rfind("."), clipped.rfind("!"), clipped.rfind("?"))
+    if sentence_end >= 350:
+        return clipped[: sentence_end + 1]
+    return clipped.rstrip(" ,.;:") + "..."
+
+
 def _track_background_task(task: asyncio.Task) -> None:
     try:
         task.result()
@@ -408,6 +693,45 @@ def _track_background_task(task: asyncio.Task) -> None:
         logger.error("WHATSAPP_CLOUD_BACKGROUND_ERROR error=%s", exc, exc_info=True)
 
 
+async def _enqueue_text_message(message: WhatsAppCloudInboundTextMessage) -> None:
+    config = _get_processing_config(message.phone_number_id)
+    if config is None:
+        return
+
+    should_process = await _mark_message_for_processing(message.message_id)
+    if not should_process:
+        return
+
+    await _append_pending_text_message(config, message)
+
+    if not await _acquire_pending_lock(config.client_id, message.wa_id):
+        logger.info(
+            "WHATSAPP_CLOUD_PENDING_WORKER_EXISTS client_id=%s wa_id=%s message_id=%s",
+            config.client_id,
+            message.wa_id,
+            message.message_id,
+        )
+        return
+
+    try:
+        await _process_pending_text_messages(config, message.wa_id)
+    finally:
+        await _release_pending_lock(config.client_id, message.wa_id)
+
+
+async def _process_pending_text_messages(config: WhatsAppCloudConfig, wa_id: str) -> None:
+    while True:
+        await asyncio.sleep(_get_debounce_delay_seconds())
+        messages = await _pop_pending_text_messages(config.client_id, wa_id)
+        if not messages:
+            return
+
+        await _process_text_message_batch(config, messages)
+
+        if not await _has_pending_text_messages(config.client_id, wa_id):
+            return
+
+
 async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> None:
     config = _get_processing_config(message.phone_number_id)
     if config is None:
@@ -415,6 +739,30 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
 
     should_process = await _mark_message_for_processing(message.message_id)
     if not should_process:
+        return
+
+    pending = WhatsAppCloudPendingTextMessage(
+        wa_id=message.wa_id,
+        message_id=message.message_id,
+        timestamp=message.timestamp,
+        text_body=message.text_body,
+        phone_number_id=message.phone_number_id,
+        queued_at=time.time(),
+    )
+    await _process_text_message_batch(config, [pending])
+
+
+async def _process_text_message_batch(
+    config: WhatsAppCloudConfig,
+    messages: list[WhatsAppCloudPendingTextMessage],
+) -> None:
+    if not messages:
+        return
+
+    first_message = messages[0]
+    latest_message = messages[-1]
+    combined_text = _combine_pending_text_messages(messages)
+    if not combined_text:
         return
 
     if async_session_factory is None:
@@ -439,10 +787,10 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
         )
         return
 
-    cache_key = f"whatsapp_cloud:{config.client_id}:{message.wa_id}"
-    user_ref = f"wa_cloud:{message.wa_id}"
+    cache_key = f"whatsapp_cloud:{config.client_id}:{first_message.wa_id}"
+    user_ref = f"wa_cloud:{first_message.wa_id}"
 
-    await _store.append(cache_key, "user", message.text_body)
+    await _store.append(cache_key, "user", combined_text)
     history = await _store.get(cache_key)
 
     if client.whatsapp_system_prompt:
@@ -450,21 +798,21 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
             "WHATSAPP_CLOUD_PROMPT using=whatsapp_system_prompt client_id=%s",
             config.client_id,
         )
-        prompt_override = client.whatsapp_system_prompt
     else:
         logger.info(
             "WHATSAPP_CLOUD_PROMPT using=system_prompt client_id=%s",
             config.client_id,
         )
-        prompt_override = None
+    prompt_override = _build_whatsapp_prompt_override(client)
 
     reply, is_hot_lead, temperature = await ask_claude(
-        message.wa_id,
-        message.text_body,
+        first_message.wa_id,
+        combined_text,
         client,
         history,
         system_prompt_override=prompt_override,
     )
+    reply = _normalize_whatsapp_reply(reply)
     await _store.append(cache_key, "assistant", reply)
 
     lead_id = None
@@ -474,7 +822,7 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
             client.id,
             user_ref,
         )
-        await client_service.save_message(db, conversation, "user", message.text_body)
+        await client_service.save_message(db, conversation, "user", combined_text)
         await client_service.save_message(db, conversation, "assistant", reply)
 
         if is_hot_lead:
@@ -484,14 +832,14 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
                 conversation,
                 user_ref,
                 temperature,
-                message.text_body,
+                combined_text,
             )
             lead_id = lead.id
 
     if is_hot_lead:
         recent = await _store.get(cache_key)
         await send_lead_notification(
-            sender_id=message.wa_id,
+            sender_id=first_message.wa_id,
             ai_reply=reply,
             temperature=temperature,
             telegram_chat_id=client.telegram_manager_chat_id or "",
@@ -507,16 +855,25 @@ async def _process_text_message(message: WhatsAppCloudInboundTextMessage) -> Non
                 )
                 await db.commit()
 
-    await _send_whatsapp_cloud_reply_with_outbox(message, reply, config)
+    outbound_message = WhatsAppCloudInboundTextMessage(
+        wa_id=first_message.wa_id,
+        message_id=latest_message.message_id,
+        timestamp=latest_message.timestamp,
+        message_type="text",
+        text_body=combined_text,
+        phone_number_id=latest_message.phone_number_id,
+    )
+    await _send_whatsapp_cloud_reply_with_outbox(outbound_message, reply, config)
 
     logger.info(
-        "WHATSAPP_CLOUD_PROCESSING_OK client_id=%s wa_id=%s message_id=%s temp=%s hot=%s text_len=%d reply_len=%d",
+        "WHATSAPP_CLOUD_PROCESSING_OK client_id=%s wa_id=%s message_count=%d last_message_id=%s temp=%s hot=%s text_len=%d reply_len=%d",
         config.client_id,
-        message.wa_id,
-        message.message_id,
+        first_message.wa_id,
+        len(messages),
+        latest_message.message_id,
         temperature,
         is_hot_lead,
-        len(message.text_body),
+        len(combined_text),
         len(reply),
     )
 
@@ -599,7 +956,7 @@ async def receive_whatsapp_cloud_webhook(request: Request):
         return {"status": "ok"}
 
     for message in messages:
-        task = asyncio.create_task(_process_text_message(message))
+        task = asyncio.create_task(_enqueue_text_message(message))
         task.add_done_callback(_track_background_task)
 
     return {"status": "ok"}

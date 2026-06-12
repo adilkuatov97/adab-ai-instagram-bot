@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
+from app import whatsapp_cloud_routes
 from app.whatsapp_cloud_routes import (
     WhatsAppCloudConfig,
     WhatsAppCloudInboundTextMessage,
+    _enqueue_text_message,
     _extract_text_messages,
     _extract_webhook_metadata,
     _get_processing_config,
@@ -593,9 +595,184 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
 
         save_mock.assert_not_awaited()
 
+
+class WhatsAppCloudDebounceTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        whatsapp_cloud_routes._pending_memory.clear()
+        whatsapp_cloud_routes._pending_memory_locks.clear()
+        whatsapp_cloud_routes._store._fallback.clear()
+        whatsapp_cloud_routes._store._seen_mids.clear()
+        whatsapp_cloud_routes._store._redis = None
+
+    async def test_three_fast_messages_send_one_reply(self):
+        send_mock = AsyncMock()
+        ask_mock = AsyncMock(return_value=("Понимаю. 5 дней — это срок под рабочий бот, а не сырой шаблон.", False, "cold"))
+
+        with self._patch_processing_dependencies(ask_mock=ask_mock, send_mock=send_mock):
+            await asyncio.gather(
+                _enqueue_text_message(_message("wa-1", "wamid.1", "Вы говорите 5 дней долго")),
+                _enqueue_text_message(_message("wa-1", "wamid.2", "Конкуренты делают за 2 часа")),
+                _enqueue_text_message(_message("wa-1", "wamid.3", "Почему так?")),
+            )
+
+        ask_mock.assert_awaited_once()
+        send_mock.assert_awaited_once()
+        self.assertEqual(
+            ask_mock.call_args.args[1],
+            "Вы говорите 5 дней долго\nКонкуренты делают за 2 часа\nПочему так?",
+        )
+
+    async def test_duplicate_message_id_is_not_processed_twice(self):
+        send_mock = AsyncMock()
+        ask_mock = AsyncMock(return_value=("Ответ один.", False, "cold"))
+
+        with self._patch_processing_dependencies(ask_mock=ask_mock, send_mock=send_mock):
+            await _enqueue_text_message(_message("wa-1", "wamid.same", "Первое"))
+            await _enqueue_text_message(_message("wa-1", "wamid.same", "Дубль"))
+
+        ask_mock.assert_awaited_once()
+        send_mock.assert_awaited_once()
+        self.assertEqual(ask_mock.call_args.args[1], "Первое")
+
+    async def test_different_wa_ids_are_processed_separately(self):
+        send_mock = AsyncMock()
+        ask_mock = AsyncMock(return_value=("Ответ.", False, "cold"))
+
+        with self._patch_processing_dependencies(ask_mock=ask_mock, send_mock=send_mock):
+            await asyncio.gather(
+                _enqueue_text_message(_message("wa-1", "wamid.wa1", "Первый клиент")),
+                _enqueue_text_message(_message("wa-2", "wamid.wa2", "Второй клиент")),
+            )
+
+        self.assertEqual(ask_mock.await_count, 2)
+        self.assertEqual(send_mock.await_count, 2)
+        sent_texts = sorted(call.args[1] for call in ask_mock.await_args_list)
+        self.assertEqual(sent_texts, ["Второй клиент", "Первый клиент"])
+
+    async def test_redis_unavailable_falls_back_safely(self):
+        send_mock = AsyncMock()
+        ask_mock = AsyncMock(return_value=("Ответ из fallback.", False, "cold"))
+        whatsapp_cloud_routes._store._redis = _FailingRedis()
+
+        with self._patch_processing_dependencies(ask_mock=ask_mock, send_mock=send_mock):
+            await asyncio.gather(
+                _enqueue_text_message(_message("wa-1", "wamid.fallback.1", "Раз")),
+                _enqueue_text_message(_message("wa-1", "wamid.fallback.2", "Два")),
+            )
+
+        ask_mock.assert_awaited_once()
+        send_mock.assert_awaited_once()
+        self.assertEqual(ask_mock.call_args.args[1], "Раз\nДва")
+
+    def _patch_processing_dependencies(self, *, ask_mock: AsyncMock, send_mock: AsyncMock):
+        return _CombinedPatches(
+            patch.dict(
+                os.environ,
+                {
+                    "WHATSAPP_CLOUD_ACCESS_TOKEN": "test-token",
+                    "WHATSAPP_CLOUD_DEFAULT_CLIENT_ID": "client-id",
+                    "WHATSAPP_CLOUD_PHONE_NUMBER_ID": "phone-id",
+                },
+                clear=True,
+            ),
+            patch("app.whatsapp_cloud_routes._get_debounce_delay_seconds", return_value=0.01),
+            patch("app.whatsapp_cloud_routes.async_session_factory", _FakeSessionFactory),
+            patch("app.whatsapp_cloud_routes.client_service.get_by_id", new=AsyncMock(return_value=_FakeClient())),
+            patch("app.whatsapp_cloud_routes.client_service.get_or_create_conversation", new=AsyncMock(return_value=_FakeConversation())),
+            patch("app.whatsapp_cloud_routes.client_service.save_message", new=AsyncMock()),
+            patch("app.whatsapp_cloud_routes.client_service.save_lead", new=AsyncMock()),
+            patch("app.whatsapp_cloud_routes.ask_claude", new=ask_mock),
+            patch("app.whatsapp_cloud_routes._send_whatsapp_cloud_reply_with_outbox", new=send_mock),
+            patch("app.whatsapp_cloud_routes.send_lead_notification", new=AsyncMock()),
+        )
+
+
 class _FakeRequest:
     def __init__(self, headers):
         self.headers = headers
+
+
+class _FakeClient:
+    id = "client-id"
+    status = "active"
+    whatsapp_system_prompt = ""
+    system_prompt = "Base prompt"
+    telegram_manager_chat_id = ""
+    whatsapp_link = ""
+
+
+class _FakeConversation:
+    id = "conversation-id"
+
+
+class _FakeSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def execute(self, *args, **kwargs):
+        return None
+
+    async def commit(self):
+        return None
+
+
+def _FakeSessionFactory():
+    return _FakeSession()
+
+
+class _FailingRedis:
+    async def get(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def set(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def rpush(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def lrange(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def llen(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def setnx(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def expire(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+    async def delete(self, *args, **kwargs):
+        raise RuntimeError("redis unavailable")
+
+
+class _CombinedPatches:
+    def __init__(self, *patches):
+        self._patches = patches
+
+    def __enter__(self):
+        for patcher in self._patches:
+            patcher.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        for patcher in reversed(self._patches):
+            patcher.__exit__(exc_type, exc, tb)
+        return False
+
+
+def _message(wa_id: str, message_id: str, text: str) -> WhatsAppCloudInboundTextMessage:
+    return WhatsAppCloudInboundTextMessage(
+        wa_id=wa_id,
+        message_id=message_id,
+        timestamp="1710000000",
+        message_type="text",
+        text_body=text,
+        phone_number_id="phone-id",
+    )
 
 
 if __name__ == "__main__":
