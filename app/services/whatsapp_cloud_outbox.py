@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "")
 FAILED_OUTBOX_ZSET_KEY = "whatsapp_cloud:outbox:failed:zset"
 FAILED_OUTBOX_ITEM_KEY_PREFIX = "whatsapp_cloud:outbox:failed:item:"
+DEFAULT_OUTBOX_ITEM_TTL_SECONDS = 7 * 24 * 60 * 60
 
 _redis_client = None
 _redis_checked = False
@@ -71,7 +72,11 @@ async def save_failed_outbox_item(item: WhatsAppCloudOutboxItem) -> None:
 
     item_key = _item_key(item.id)
     try:
-        await redis.set(item_key, serialize_outbox_item(item))
+        await redis.set(
+            item_key,
+            serialize_outbox_item(item),
+            ex=_get_outbox_item_ttl_seconds(),
+        )
         await redis.zadd(FAILED_OUTBOX_ZSET_KEY, {item.id: _created_at_score_ms(item.created_at)})
         logger.info(
             "WHATSAPP_CLOUD_OUTBOX_SAVE_OK item_id=%s client_id=%s message_id=%s",
@@ -134,6 +139,8 @@ async def list_outbox_items(limit: int = 20) -> list[WhatsAppCloudOutboxItem]:
         item = await load_outbox_item(str(item_id))
         if item is not None:
             items.append(item)
+        else:
+            await _remove_stale_outbox_index(str(item_id))
     return items
 
 
@@ -193,7 +200,11 @@ async def increment_outbox_item_attempts(item_id: str, last_error: str) -> None:
     )
 
     try:
-        await redis.set(_item_key(item_id), serialize_outbox_item(updated))
+        await redis.set(
+            _item_key(item_id),
+            serialize_outbox_item(updated),
+            ex=_get_outbox_item_ttl_seconds(),
+        )
         await redis.zadd(FAILED_OUTBOX_ZSET_KEY, {item_id: int(time.time() * 1000)})
         logger.info(
             "WHATSAPP_CLOUD_OUTBOX_INCREMENT_OK item_id=%s attempts=%d",
@@ -262,6 +273,33 @@ def _created_at_score_ms(created_at: str) -> int:
         return int(datetime.fromisoformat(normalized).timestamp() * 1000)
     except ValueError:
         return int(time.time() * 1000)
+
+
+def _get_outbox_item_ttl_seconds() -> int:
+    raw = os.getenv("WHATSAPP_CLOUD_OUTBOX_TTL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_OUTBOX_ITEM_TTL_SECONDS
+    try:
+        ttl = int(raw)
+    except ValueError:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_TTL_INVALID")
+        return DEFAULT_OUTBOX_ITEM_TTL_SECONDS
+    return max(60, min(ttl, 30 * 24 * 60 * 60))
+
+
+async def _remove_stale_outbox_index(item_id: str) -> None:
+    redis = await _get_redis_client()
+    if redis is None:
+        return
+    try:
+        await redis.zrem(FAILED_OUTBOX_ZSET_KEY, item_id)
+        logger.info("WHATSAPP_CLOUD_OUTBOX_STALE_INDEX_REMOVED item_id=%s", item_id)
+    except Exception as exc:
+        logger.warning(
+            "WHATSAPP_CLOUD_OUTBOX_STALE_INDEX_REMOVE_ERROR item_id=%s error=%s",
+            item_id,
+            exc.__class__.__name__,
+        )
 
 
 def _required_str(data: dict[str, Any], key: str) -> str:

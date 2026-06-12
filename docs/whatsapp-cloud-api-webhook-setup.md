@@ -30,7 +30,7 @@ Required for webhook verification:
 WHATSAPP_CLOUD_VERIFY_TOKEN=
 ```
 
-Recommended for secure webhook delivery verification:
+Required in production for secure webhook delivery verification:
 
 ```text
 WHATSAPP_CLOUD_APP_SECRET=
@@ -45,7 +45,7 @@ WHATSAPP_CLOUD_DEFAULT_CLIENT_ID=
 WHATSAPP_CLOUD_API_VERSION=v25.0
 ```
 
-The app still starts when these variables are missing. Missing values only affect the new WhatsApp Cloud API webhook routes.
+The app still starts when these variables are missing. In production, POST `/whatsapp/cloud/webhook` rejects requests until `WHATSAPP_CLOUD_APP_SECRET` is configured.
 
 ## Subscribe to messages
 
@@ -59,18 +59,18 @@ After callback verification succeeds:
 ## What this PR does
 
 - Adds `GET /whatsapp/cloud/webhook` for Meta webhook verification.
-- Adds `POST /whatsapp/cloud/webhook` as a safe receive stub.
-- Verifies `x-hub-signature-256` when `WHATSAPP_CLOUD_APP_SECRET` is configured.
+- Adds `POST /whatsapp/cloud/webhook` for safe receive and background text processing.
+- Verifies `x-hub-signature-256`; production rejects POST requests if `WHATSAPP_CLOUD_APP_SECRET` is missing.
 - Logs only safe metadata.
+- Routes inbound text messages to the configured client and sends replies through the official Cloud API.
 - Keeps existing Baileys/internal `POST /whatsapp/message` behavior unchanged.
 
 ## What this PR does not do yet
 
-- Does not connect WhatsApp Cloud messages to Claude.
-- Does not send WhatsApp Cloud API replies.
 - Does not change Instagram webhook behavior.
-- Does not change database models.
-- Does not process or persist incoming Cloud API message text.
+- Does not support templates for outbound messages outside the 24-hour customer service window.
+- Does not support WhatsApp media/voice messages yet.
+- Does not move `phone_number_id -> client_id` routing into the database yet.
 
 ## Next step
 

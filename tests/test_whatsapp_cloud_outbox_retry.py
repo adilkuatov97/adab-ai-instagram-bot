@@ -72,8 +72,25 @@ class WhatsAppCloudOutboxRetryTest(unittest.TestCase):
         self.assertEqual(increment_mock.call_args.args[0], "item-1")
         self.assertIn("WhatsAppCloudSendError", increment_mock.call_args.args[1])
 
+    def test_retry_skips_when_max_attempts_reached(self):
+        item = _item("item-1", attempts=5)
 
-def _item(item_id: str):
+        with patch(
+            "app.services.whatsapp_cloud_outbox_retry.load_outbox_item",
+            new=AsyncMock(return_value=item),
+        ):
+            with patch(
+                "app.services.whatsapp_cloud_outbox_retry.send_whatsapp_cloud_text",
+                new=AsyncMock(),
+            ) as send_mock:
+                with patch.dict("os.environ", {}, clear=True):
+                    ok = asyncio.run(retry_outbox_item("item-1"))
+
+        self.assertFalse(ok)
+        send_mock.assert_not_awaited()
+
+
+def _item(item_id: str, attempts: int = 1):
     return WhatsAppCloudOutboxItem(
         id=item_id,
         client_id="client-id",
@@ -84,7 +101,7 @@ def _item(item_id: str):
         reply_text="reply text",
         created_at="2026-06-05T10:00:00+00:00",
         last_error="WhatsAppCloudSendError: status=400",
-        attempts=1,
+        attempts=attempts,
     )
 
 

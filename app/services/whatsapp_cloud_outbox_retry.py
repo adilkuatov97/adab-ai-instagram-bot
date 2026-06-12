@@ -18,12 +18,24 @@ logger = logging.getLogger(__name__)
 
 WHATSAPP_CLOUD_ACCESS_TOKEN_ENV = "WHATSAPP_CLOUD_ACCESS_TOKEN"
 WHATSAPP_CLOUD_API_VERSION_ENV = "WHATSAPP_CLOUD_API_VERSION"
+WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS_ENV = "WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS"
+DEFAULT_OUTBOX_MAX_ATTEMPTS = 5
 
 
 async def retry_outbox_item(item_id: str) -> bool:
     item = await load_outbox_item(item_id)
     if item is None:
         logger.info("WHATSAPP_CLOUD_OUTBOX_RETRY_SKIP item_found=false item_id=%s", item_id)
+        return False
+
+    max_attempts = _get_max_attempts()
+    if item.attempts >= max_attempts:
+        logger.warning(
+            "WHATSAPP_CLOUD_OUTBOX_RETRY_SKIP max_attempts_reached=true item_id=%s attempts=%d max_attempts=%d",
+            item_id,
+            item.attempts,
+            max_attempts,
+        )
         return False
 
     access_token = os.getenv(WHATSAPP_CLOUD_ACCESS_TOKEN_ENV, "").strip()
@@ -70,3 +82,15 @@ def _safe_retry_error(exc: Exception) -> str:
     message = str(exc).replace("\n", " ").replace("\r", " ").strip()
     safe_error = f"{exc.__class__.__name__}: {message}" if message else exc.__class__.__name__
     return safe_error[:500]
+
+
+def _get_max_attempts() -> int:
+    raw = os.getenv(WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_OUTBOX_MAX_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("WHATSAPP_CLOUD_OUTBOX_MAX_ATTEMPTS_INVALID")
+        return DEFAULT_OUTBOX_MAX_ATTEMPTS
+    return max(1, min(value, 20))

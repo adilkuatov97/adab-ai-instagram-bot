@@ -24,7 +24,7 @@ class _FakeRedis:
         self.values: dict[str, str] = {}
         self.zsets: dict[str, dict[str, int]] = {}
 
-    async def set(self, key, value):
+    async def set(self, key, value, ex=None):
         self.values[key] = value
 
     async def delete(self, key):
