@@ -620,6 +620,24 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
 
         self.assertLessEqual(len(reply), 700)
 
+    def test_bath_context_removes_wrong_niche_examples(self):
+        reply = _normalize_whatsapp_reply(
+            (
+                "Да, быстрый шаблон можно поставить за 2 часа. Но конкуренты просто делают плохо. "
+                "Например, для маникюра можно настроить запись и услуги. "
+                "А для вашей бани лучше учесть бронь, парилку, тарифы и часы работы. "
+                "Хотите, покажу на примере вашей бани?"
+            ),
+            user_text="У нас баня. Вы говорите 5 дней долго, конкуренты делают за 2 часа.",
+        )
+        lowered = reply.lower()
+
+        self.assertNotIn("маникюр", lowered)
+        self.assertNotIn("конкуренты просто", lowered)
+        self.assertNotIn("делают плохо", lowered)
+        self.assertIn("бани", lowered)
+        self.assertLessEqual(len(reply), 600)
+
     def test_successful_ai_reply_is_not_replaced_with_manager_fallback(self):
         reply = _apply_manager_fallback_rules(
             user_text="Конкуренты делают за 2 часа",
