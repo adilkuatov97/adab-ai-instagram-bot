@@ -7,38 +7,84 @@ from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Client, Conversation, Lead, Message
+from app.db.models import Client, ClientInstagramAccount, Conversation, Lead, Message
 from app.services.crypto_service import encrypt, decrypt
 
 
 async def get_by_instagram_id(db: AsyncSession, instagram_account_id: str) -> Client | None:
-    result = await db.execute(
-        select(Client).where(Client.instagram_account_id == instagram_account_id)
+    mapped_result = await db.execute(
+        select(Client)
+        .join(ClientInstagramAccount)
+        .where(
+            ClientInstagramAccount.instagram_account_id == instagram_account_id,
+            ClientInstagramAccount.status == "active",
+        )
     )
-    return result.scalar_one_or_none()
+    mapped_client = mapped_result.scalar_one_or_none()
+    if mapped_client is not None:
+        return mapped_client
+
+    return await get_legacy_client_by_instagram_account_id(db, instagram_account_id)
 
 
 async def bind_instagram_account_id(
     db: AsyncSession,
     client_id: str,
     instagram_account_id: str,
+    account_name: str | None = None,
 ) -> Client | None:
     client = await get_by_id(db, client_id)
     if not client:
         return None
 
-    existing = await get_by_instagram_id(db, instagram_account_id)
-    if existing is not None and existing.id != client.id:
+    existing_binding = await get_instagram_account_binding(db, instagram_account_id)
+    if existing_binding is not None and existing_binding.client_id != client.id:
         raise ValueError("instagram_account_id is already bound to another client")
 
-    if client.instagram_account_id == instagram_account_id:
+    legacy_client = await get_legacy_client_by_instagram_account_id(db, instagram_account_id)
+    if legacy_client is not None and legacy_client.id != client.id:
+        raise ValueError("instagram_account_id is already bound to another client")
+
+    if existing_binding is not None:
+        existing_binding.account_name = account_name or existing_binding.account_name
+        existing_binding.status = "active"
+        existing_binding.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(client)
         return client
 
-    client.instagram_account_id = instagram_account_id
-    client.updated_at = datetime.now(timezone.utc)
+    binding = ClientInstagramAccount(
+        client_id=client.id,
+        instagram_account_id=instagram_account_id,
+        account_name=account_name,
+        status="active",
+    )
+    db.add(binding)
     await db.commit()
     await db.refresh(client)
     return client
+
+
+async def get_instagram_account_binding(
+    db: AsyncSession,
+    instagram_account_id: str,
+) -> ClientInstagramAccount | None:
+    result = await db.execute(
+        select(ClientInstagramAccount).where(
+            ClientInstagramAccount.instagram_account_id == instagram_account_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_legacy_client_by_instagram_account_id(
+    db: AsyncSession,
+    instagram_account_id: str,
+) -> Client | None:
+    result = await db.execute(
+        select(Client).where(Client.instagram_account_id == instagram_account_id)
+    )
+    return result.scalar_one_or_none()
 
 
 async def get_by_id(db: AsyncSession, client_id: str) -> Client | None:
