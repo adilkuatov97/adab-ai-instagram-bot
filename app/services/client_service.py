@@ -18,6 +18,29 @@ async def get_by_instagram_id(db: AsyncSession, instagram_account_id: str) -> Cl
     return result.scalar_one_or_none()
 
 
+async def bind_instagram_account_id(
+    db: AsyncSession,
+    client_id: str,
+    instagram_account_id: str,
+) -> Client | None:
+    client = await get_by_id(db, client_id)
+    if not client:
+        return None
+
+    existing = await get_by_instagram_id(db, instagram_account_id)
+    if existing is not None and existing.id != client.id:
+        raise ValueError("instagram_account_id is already bound to another client")
+
+    if client.instagram_account_id == instagram_account_id:
+        return client
+
+    client.instagram_account_id = instagram_account_id
+    client.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(client)
+    return client
+
+
 async def get_by_id(db: AsyncSession, client_id: str) -> Client | None:
     result = await db.execute(
         select(Client).where(Client.id == uuid.UUID(client_id))
