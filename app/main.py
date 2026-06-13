@@ -181,7 +181,13 @@ def _is_production() -> bool:
 
 def _verify_meta_signature(request: Request, raw_body: bytes) -> None:
     if not APP_SECRET:
-        logger.warning("META_SIG_SKIP app_secret_not_configured")
+        if _is_production():
+            logger.error("META_SIG_REJECT app_secret_configured=false production=true")
+            raise HTTPException(
+                status_code=503,
+                detail="Meta signature verification is not configured",
+            )
+        logger.warning("META_SIG_SKIP app_secret_configured=false production=false")
         return
     signature = request.headers.get("x-hub-signature-256", "")
     if not signature.startswith("sha256="):
@@ -324,7 +330,6 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
         body.get("object"),
         len(body.get("entry", [])),
     )
-    logger.debug("INCOMING: %s", body)
     try:
         for entry in body.get("entry", []):
             account_id = entry.get("id")
