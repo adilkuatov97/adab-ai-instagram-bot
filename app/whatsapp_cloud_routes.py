@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -69,7 +70,11 @@ WHATSAPP RESPONSE POLICY
 В конце максимум один мягкий вопрос.
 
 Если клиент говорит, что конкуренты делают за 2 часа, стиль такой:
-"Да, быстрый шаблон можно поставить за 2 часа. Разница в том, что мы не просто подключаем кнопки, а настраиваем ответы под ваш бизнес: услуги, цены, бронирование и частые вопросы. Можно начать с быстрого MVP, а затем за несколько дней довести до нормального качества. Хотите, покажу разницу на вашем примере?"
+"Да, быстрый шаблон можно поставить за 2 часа. Разница в том, что мы не просто подключаем кнопки, а настраиваем AI под вашу баню: VIP-кабинки, парилку, массаж, бронь, свободное время, тарифы, количество гостей и часы работы. Можно начать с быстрого MVP, а затем довести качество. Хотите, покажу на примере вашей бани?"
+
+Если в истории или сообщении есть "баня", "сауна", "парилка" — используй примеры только из этой ниши:
+VIP-кабинка, парилка, массаж, бронь, свободное время, тарифы, количество гостей, часы работы.
+Не используй примеры про маникюр, стоматологию, кафе, цветы, если клиент сам не назвал такую нишу.
 """
 BANNED_WHATSAPP_REPLY_PHRASES = (
     "идеально",
@@ -80,6 +85,19 @@ BANNED_WHATSAPP_REPLY_PHRASES = (
     "не знают",
     "конкуренты делают плохо",
     "у конкурентов плохо",
+)
+BATH_NICHE_MARKERS = ("баня", "баню", "бане", "бани", "сауна", "сауну", "сауне", "парилка", "парилку", "парилке")
+FORBIDDEN_BATH_NICHE_EXAMPLES = (
+    "маникюр",
+    "маникюра",
+    "маникюрный",
+    "стоматология",
+    "стоматологию",
+    "стоматологии",
+    "кафе",
+    "кофейня",
+    "цветы",
+    "цветочный",
 )
 
 router = APIRouter()
@@ -688,8 +706,9 @@ def _combine_pending_text_messages(messages: list[WhatsAppCloudPendingTextMessag
     return "\n".join(message.text_body.strip() for message in messages if message.text_body.strip())
 
 
-def _normalize_whatsapp_reply(reply: str) -> str:
+def _normalize_whatsapp_reply(reply: str, user_text: str = "") -> str:
     normalized = _remove_banned_whatsapp_reply_phrases(" ".join(reply.split()).strip())
+    normalized = _remove_wrong_niche_examples(normalized, user_text)
     max_chars = 600
     if len(normalized) <= max_chars:
         return normalized
@@ -736,9 +755,22 @@ def _remove_banned_whatsapp_reply_phrases(reply: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
-def re_sub_case_insensitive(pattern: str, replacement: str, text: str) -> str:
-    import re
+def _remove_wrong_niche_examples(reply: str, user_text: str) -> str:
+    if not _is_bath_context(user_text):
+        return reply
 
+    cleaned = reply
+    for phrase in FORBIDDEN_BATH_NICHE_EXAMPLES:
+        cleaned = re_sub_case_insensitive(phrase, "", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def _is_bath_context(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in BATH_NICHE_MARKERS)
+
+
+def re_sub_case_insensitive(pattern: str, replacement: str, text: str) -> str:
     return re.sub(re.escape(pattern), replacement, text, flags=re.IGNORECASE)
 
 
@@ -875,7 +907,7 @@ async def _process_text_message_batch(
         reply=reply,
         history_before_reply=history,
     )
-    reply = _normalize_whatsapp_reply(reply)
+    reply = _normalize_whatsapp_reply(reply, user_text=combined_text)
     await _store.append(cache_key, "assistant", reply)
 
     lead_id = None
