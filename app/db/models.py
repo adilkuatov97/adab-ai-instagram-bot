@@ -41,6 +41,21 @@ class Client(Base):
 
     conversations = relationship("Conversation", back_populates="client", cascade="all, delete-orphan")
     leads = relationship("Lead", back_populates="client", cascade="all, delete-orphan")
+    instagram_accounts = relationship("ClientInstagramAccount", back_populates="client", cascade="all, delete-orphan")
+
+
+class ClientInstagramAccount(Base):
+    __tablename__ = "client_instagram_accounts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("clients.id", ondelete="CASCADE"), nullable=False, index=True)
+    instagram_account_id = Column(Text, unique=True, nullable=False, index=True)
+    account_name = Column(Text, nullable=True)
+    status = Column(String, default="active", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_now, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now, nullable=False)
+
+    client = relationship("Client", back_populates="instagram_accounts")
 
 
 class Conversation(Base):
