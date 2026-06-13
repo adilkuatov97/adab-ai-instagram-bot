@@ -10,15 +10,19 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 from app import whatsapp_cloud_routes
+from app.services.claude_service import EMPTY_CLAUDE_FALLBACK, SAFE_CLAUDE_FALLBACK
 from app.whatsapp_cloud_routes import (
     WhatsAppCloudConfig,
     WhatsAppCloudInboundTextMessage,
+    WHATSAPP_CLOUD_RESPONSE_POLICY,
     _enqueue_text_message,
+    _apply_manager_fallback_rules,
     _extract_text_messages,
     _extract_webhook_metadata,
     _get_processing_config,
     _is_valid_signature,
     _mark_message_for_processing,
+    _normalize_whatsapp_reply,
     _send_whatsapp_cloud_reply,
     _send_whatsapp_cloud_reply_with_outbox,
     _verify_signature_if_configured,
@@ -594,6 +598,55 @@ class WhatsAppCloudRoutesTest(unittest.TestCase):
                 )
 
         save_mock.assert_not_awaited()
+
+    def test_whatsapp_policy_blocks_aggressive_competitor_language(self):
+        self.assertIn("Не обесценивай конкурентов", WHATSAPP_CLOUD_RESPONSE_POLICY)
+        self.assertIn("Максимум 450–600 символов", WHATSAPP_CLOUD_RESPONSE_POLICY)
+
+        reply = _normalize_whatsapp_reply(
+            "Мы лучший вариант, конкуренты просто делают плохо и не знают все нюансы. "
+            "Сделаем идеально под вас."
+        )
+        lowered = reply.lower()
+
+        self.assertNotIn("лучший", lowered)
+        self.assertNotIn("конкуренты просто", lowered)
+        self.assertNotIn("делают плохо", lowered)
+        self.assertNotIn("все нюансы", lowered)
+        self.assertNotIn("идеально", lowered)
+
+    def test_whatsapp_reply_length_guard(self):
+        reply = _normalize_whatsapp_reply("А" * 900)
+
+        self.assertLessEqual(len(reply), 700)
+
+    def test_successful_ai_reply_is_not_replaced_with_manager_fallback(self):
+        reply = _apply_manager_fallback_rules(
+            user_text="Конкуренты делают за 2 часа",
+            reply="Да, быстрый шаблон можно поставить за 2 часа.",
+            history_before_reply=[{"role": "assistant", "content": "Нормальный предыдущий ответ"}],
+        )
+
+        self.assertEqual(reply, "Да, быстрый шаблон можно поставить за 2 часа.")
+        self.assertNotEqual(reply, SAFE_CLAUDE_FALLBACK)
+
+    def test_manager_fallback_after_two_empty_fallbacks(self):
+        reply = _apply_manager_fallback_rules(
+            user_text="Не понял",
+            reply=EMPTY_CLAUDE_FALLBACK,
+            history_before_reply=[{"role": "assistant", "content": EMPTY_CLAUDE_FALLBACK}],
+        )
+
+        self.assertEqual(reply, SAFE_CLAUDE_FALLBACK)
+
+    def test_manager_fallback_when_client_requests_manager(self):
+        reply = _apply_manager_fallback_rules(
+            user_text="Позовите менеджера",
+            reply="Могу подсказать по срокам.",
+            history_before_reply=[],
+        )
+
+        self.assertEqual(reply, SAFE_CLAUDE_FALLBACK)
 
 
 class WhatsAppCloudDebounceTest(unittest.IsolatedAsyncioTestCase):

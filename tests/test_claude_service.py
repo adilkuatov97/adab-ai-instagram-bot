@@ -26,6 +26,7 @@ class ClaudeServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(reply, "Да, можем запустить аккуратно.")
+        self.assertNotEqual(reply, claude_service.SAFE_CLAUDE_FALLBACK)
         self.assertTrue(is_hot_lead)
         self.assertEqual(temperature, 1)
 
@@ -42,6 +43,7 @@ class ClaudeServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(reply, "Понимаю. 5 дней — это срок на рабочий бот, не на сырой шаблон.")
+        self.assertNotEqual(reply, claude_service.SAFE_CLAUDE_FALLBACK)
         self.assertFalse(is_hot_lead)
         self.assertEqual(temperature, 0)
 
@@ -123,6 +125,22 @@ class ClaudeServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_hot_lead)
         self.assertEqual(temperature, 0)
 
+    async def test_claude_unavailable_returns_one_safe_manager_fallback(self):
+        claude_service._anthropic_client = _FailingAnthropicClient()
+
+        reply, is_hot_lead, temperature = await claude_service.ask_claude(
+            "sender",
+            "Позовите менеджера",
+            _FakeClient(),
+            [{"role": "user", "content": "Позовите менеджера"}],
+            system_prompt_override="WHATSAPP RESPONSE POLICY",
+        )
+
+        self.assertEqual(reply, claude_service.SAFE_CLAUDE_FALLBACK)
+        self.assertNotIn("Здравствуйте! Сейчас менеджер подключится", reply)
+        self.assertFalse(is_hot_lead)
+        self.assertEqual(temperature, 0)
+
 
 class _FakeClient:
     whatsapp_link = ""
@@ -140,6 +158,16 @@ class _FakeMessages:
 
     async def create(self, **kwargs):
         return SimpleNamespace(content=[SimpleNamespace(text=self._text)])
+
+
+class _FailingAnthropicClient:
+    messages = None
+
+    def __init__(self):
+        self.messages = self
+
+    async def create(self, **kwargs):
+        raise RuntimeError("anthropic unavailable")
 
 
 if __name__ == "__main__":

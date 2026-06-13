@@ -19,7 +19,7 @@ from sqlalchemy import update as sa_update
 from app.db.database import async_session_factory
 from app.db.models import Lead
 from app.services import client_service
-from app.services.claude_service import ask_claude
+from app.services.claude_service import EMPTY_CLAUDE_FALLBACK, SAFE_CLAUDE_FALLBACK, ask_claude
 from app.services.conversation_store import ConversationStore
 from app.services.telegram_service import send_lead_notification
 from app.services.whatsapp_cloud_outbox import (
@@ -56,15 +56,31 @@ WHATSAPP_CLOUD_RESPONSE_POLICY = """
 WHATSAPP RESPONSE POLICY
 
 Пиши как живой менеджер в WhatsApp: спокойно, уверенно, конкретно.
-Максимум 500–700 символов.
+Максимум 450–600 символов.
 Одна мысль = один короткий ответ.
 Не повторяй CTA в каждом сообщении.
 Не дави на Zoom/созвон сразу.
-Если клиент возражает — сначала ответь на конкретное возражение.
+Если клиент возражает — сначала признай возражение, потом спокойно объясни разницу.
+Не обесценивай конкурентов.
+Не используй фразы "идеально", "лучший", "все нюансы" без доказательств.
 Не звучать как агрессивный продажник.
 Не перечисляй всё подряд, не пиши воду.
 Если несколько сообщений клиента объединены, отвечай одним цельным сообщением.
+В конце максимум один мягкий вопрос.
+
+Если клиент говорит, что конкуренты делают за 2 часа, стиль такой:
+"Да, быстрый шаблон можно поставить за 2 часа. Разница в том, что мы не просто подключаем кнопки, а настраиваем ответы под ваш бизнес: услуги, цены, бронирование и частые вопросы. Можно начать с быстрого MVP, а затем за несколько дней довести до нормального качества. Хотите, покажу разницу на вашем примере?"
 """
+BANNED_WHATSAPP_REPLY_PHRASES = (
+    "идеально",
+    "лучший",
+    "все нюансы",
+    "конкуренты просто",
+    "делают плохо",
+    "не знают",
+    "конкуренты делают плохо",
+    "у конкурентов плохо",
+)
 
 router = APIRouter()
 _store = ConversationStore(REDIS_URL)
@@ -673,15 +689,57 @@ def _combine_pending_text_messages(messages: list[WhatsAppCloudPendingTextMessag
 
 
 def _normalize_whatsapp_reply(reply: str) -> str:
-    normalized = " ".join(reply.split()).strip()
-    if len(normalized) <= 700:
+    normalized = _remove_banned_whatsapp_reply_phrases(" ".join(reply.split()).strip())
+    max_chars = 600
+    if len(normalized) <= max_chars:
         return normalized
 
-    clipped = normalized[:700].rstrip()
+    clipped = normalized[:max_chars].rstrip()
     sentence_end = max(clipped.rfind("."), clipped.rfind("!"), clipped.rfind("?"))
     if sentence_end >= 350:
         return clipped[: sentence_end + 1]
     return clipped.rstrip(" ,.;:") + "..."
+
+
+def _apply_manager_fallback_rules(
+    *,
+    user_text: str,
+    reply: str,
+    history_before_reply: list[dict],
+) -> str:
+    if reply == SAFE_CLAUDE_FALLBACK:
+        return reply
+    if _client_requested_manager(user_text):
+        return SAFE_CLAUDE_FALLBACK
+    if reply == EMPTY_CLAUDE_FALLBACK and _last_assistant_reply(history_before_reply) == EMPTY_CLAUDE_FALLBACK:
+        return SAFE_CLAUDE_FALLBACK
+    return reply
+
+
+def _client_requested_manager(user_text: str) -> bool:
+    lowered = user_text.lower()
+    return any(marker in lowered for marker in ("менеджер", "оператор", "человек", "сотрудник"))
+
+
+def _last_assistant_reply(history: list[dict]) -> str | None:
+    for message in reversed(history):
+        if message.get("role") == "assistant":
+            content = message.get("content")
+            return content if isinstance(content, str) else None
+    return None
+
+
+def _remove_banned_whatsapp_reply_phrases(reply: str) -> str:
+    cleaned = reply
+    for phrase in BANNED_WHATSAPP_REPLY_PHRASES:
+        cleaned = re_sub_case_insensitive(phrase, "", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def re_sub_case_insensitive(pattern: str, replacement: str, text: str) -> str:
+    import re
+
+    return re.sub(re.escape(pattern), replacement, text, flags=re.IGNORECASE)
 
 
 def _track_background_task(task: asyncio.Task) -> None:
@@ -811,6 +869,11 @@ async def _process_text_message_batch(
         client,
         history,
         system_prompt_override=prompt_override,
+    )
+    reply = _apply_manager_fallback_rules(
+        user_text=combined_text,
+        reply=reply,
+        history_before_reply=history,
     )
     reply = _normalize_whatsapp_reply(reply)
     await _store.append(cache_key, "assistant", reply)
