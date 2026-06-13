@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import Client, Conversation
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-SAFE_CLAUDE_FALLBACK = "Здравствуйте! Сейчас менеджер подключится и ответит вам вручную."
+SAFE_CLAUDE_FALLBACK = (
+    "Понял вас. Сейчас не могу корректно ответить автоматически, поэтому лучше подключу "
+    "менеджера. Напишите, пожалуйста, что важнее обсудить: цену, сроки или как бот будет работать?"
+)
 EMPTY_CLAUDE_FALLBACK = (
     "Понял вас. Уточните, пожалуйста, что именно хотите узнать — цену, сроки запуска "
     "или как бот будет работать?"
